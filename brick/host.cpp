@@ -366,11 +366,12 @@ Video& hostVideo()
 		const bool ready = video.init(res != nullptr && strcmp(res, "1024") == 0, true, error, 1280, 1024, layered, res != nullptr && strcmp(res, "320") == 0 ? 320 : 640);
 		if (ready)
 			atexit(hostTeardown);
-		// the frames paced at the panel's own rate (DEADSTATION_PANEL_PACING=0: the PlayStation's 59.94 Hz, a frame repeated
+		// the panel at the game's rate (Panel::matchRate), the frames paced at the panel's own (DEADSTATION_PANEL_PACING=0: neither, the PlayStation's 59.94 Hz, a frame repeated
 		// every few seconds on this panel). Exactly its rate: any faster and the game itself runs fast, with frames never shown
 		const char *pacing = getenv("DEADSTATION_PANEL_PACING");
 		if (ready && (pacing == nullptr || strcmp(pacing, "0") != 0))
 		{
+			video.panel().matchRate();
 			deadstation_frame_period_ms = 1000.0 / video.panel().refreshRate();
 			psx_host_set_frame_period_ms(deadstation_frame_period_ms);
 		}
@@ -439,7 +440,7 @@ void hostFrameShown(int width, int height, bool newFrame)
 			const uint64_t guest = psx_cycle_count;
 			const uint32_t built = deadstation_game_frames;
 			DS_LOG("recomp perf: the game ran %.1f frames/s, drew %.1f (%.1f shown), longest gap %.1f ms, waiting for a page %.1f ms a frame, "
-					"submitting %.1f ms a frame, %dx%d; the module's thread %.0f%% of a core; guest speed %.0f%%; %u in-between frames", (built - perfBuiltLast) / span,
+					"submitting %.1f ms a frame, %dx%d; the module's thread %.0f%% of a core; guest speed %.1f%%; %u in-between frames", (built - perfBuiltLast) / span,
 					perfGameFrames / span, perfFrames / span, perfLongest * 1000,
 					perfPresenting * 1000 / perfFrames, perfSubmitting * 1000 / perfFrames, width, height,
 					(cpu - moduleCpuLast) * 100 / span, guestCyclesLast ? (double)(guest - guestCyclesLast) / (33868800.0 * span) * 100 : 0.0,

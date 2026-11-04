@@ -1,0 +1,392 @@
+--- a/runtime/include/spu.h
++++ b/runtime/include/spu.h
+@@ -134,6 +134,17 @@
+  * SPU CD input bus; SPU control bit 0 and CD volume registers gate output. */
+ void spu_cd_audio_push(const int16_t* stereo, int frames);
+ void spu_cd_audio_reset(void);
++/* Local patch 0033: sound mixed for the speaker, on its thread, not for the guest's clock on the game's. */
++void spu_native_audio_on(void);
++int spu_native_audio(void);
++void spu_mix_for_device(int16_t* out_stereo, int frames);	/* the audio thread */
++void spu_deliver_mixer_irq(void);							/* the game's thread */
++void spu_cd_mix_set(uint8_t l_to_l, uint8_t l_to_r, uint8_t r_to_l, uint8_t r_to_r, int muted);	/* applied as it's played */
++double spu_cd_pace(void);									/* how much faster than a console's a stream's sectors should come */
++uint32_t spu_cd_audio_fill(void);
++uint64_t spu_cd_audio_underflows(void);
++uint64_t spu_cd_audio_overflows(void);
++unsigned long long spu_mixed_frames(void);
+ 
+ /* Get pointer to SPU RAM for direct access (512KB) */
+ const uint8_t* spu_get_ram(void);
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -660,6 +660,8 @@
+     int base = (mode_reg & 0x80)
+         ? (CDROM_SINGLE_SPEED_SECTOR_CYCLES / 2)
+         : CDROM_SINGLE_SPEED_SECTOR_CYCLES;
++    if (mode_reg & 0x40u)	/* XA audio in the stream. Local patch 0033 */
++        base = (int)((double)base / spu_cd_pace());
+     return apply_read_speed(base);
+ }
+ 
+@@ -1233,6 +1235,7 @@
+ static uint8_t cd_decode_vol[2][2]  = { { 0x80, 0x00 }, { 0x00, 0x80 } };
+ 
+ static void cd_apply_decode_volume(int16_t *stereo, int frames) {
++    if (spu_native_audio()) return;	/* Local patch 0033: as it's played */
+     /* Fast path: identity matrix (the reset state). */
+     if (cd_decode_vol[0][0] == 0x80 && cd_decode_vol[1][1] == 0x80 &&
+         cd_decode_vol[0][1] == 0x00 && cd_decode_vol[1][0] == 0x00)
+@@ -1813,6 +1816,45 @@
+     return iso_handle ? iso_sector_count(iso_handle) : 0;
+ }
+ 
++/* Local patch 0033: CD audio isn't tied to the game's frames or the drive's head as the game sees it. What's coming is read
++ * ahead for the speaker, a second of it: real audio, so it adds no delay, and a late frame or a slow disc read can't run it dry.
++ * The head keeps its console timing; the track ends for the game when its sound has really ended. */
++#define CDDA_HOLD_FRAMES 44100u
++static uint32_t cdda_feed_lba;
++static int cdda_feed_track, cdda_feed_done;
++static int16_t cdda_last_pcm[CDDA_SECTOR_FRAMES * 2];	/* (what a report's peak is read from) */
++static uint32_t cdda_track_end_lba(int track);
++
++static void cdda_feed_audio(void) {
++    for (int n = 0; n < 8 && !cdda_feed_done && spu_cd_audio_fill() < CDDA_HOLD_FRAMES; n++) {
++        const uint32_t end = cdda_track_end_lba(cdda_feed_track);
++        if (end == 0 || cdda_feed_lba >= end) {
++            const int next = cdda_feed_track + 1;
++            if ((mode_reg & 0x02u) || next > iso_track_count(iso_handle) || !iso_track_is_audio(iso_handle, next)) {
++                cdda_feed_done = 1;
++                return;
++            }
++            cdda_feed_track = next;
++        }
++        uint8_t raw[RAW_SECTOR_SIZE];
++        if (!iso_read_raw_sector(iso_handle, cdda_feed_lba, raw, sizeof(raw)))
++            memset(cdda_last_pcm, 0, sizeof(cdda_last_pcm));
++        else
++            for (int i = 0; i < CDDA_SECTOR_FRAMES * 2; ++i)
++                cdda_last_pcm[i] = (int16_t)((uint16_t)raw[i * 2 + 0] | ((uint16_t)raw[i * 2 + 1] << 8));
++        spu_cd_audio_push(cdda_last_pcm, CDDA_SECTOR_FRAMES);
++        cdda_feed_lba++;
++    }
++    if (cdda_feed_done && spu_cd_audio_fill() == 0) {
++        const uint32_t end = cdda_track_end_lba(cdda_feed_track);
++        if (end != 0 && cdda_lba + 1u < end) {
++            cdda_track = cdda_feed_track;
++            cdda_lba = end - 1u;
++            cdda_delay = 0;
++        }
++    }
++}
++
+ static int start_cdda_playback(int requested_track) {
+     uint32_t lba;
+     int track;
+@@ -1838,6 +1880,7 @@
+     cdda_playing = 1;
+     cdda_track = track;
+     cdda_lba = lba;
++    cdda_feed_track = track, cdda_feed_lba = lba, cdda_feed_done = 0;
+     cdda_delay = CDROM_SINGLE_SPEED_SECTOR_CYCLES;
+     stat_reg = (stat_reg & ~(CDSTAT_SEEK | CDSTAT_READ)) |
+                CDSTAT_MOTOR | CDSTAT_PLAY;
+@@ -1845,6 +1888,9 @@
+ }
+ 
+ static void process_cdda_stream(uint32_t cycles) {
++    spu_cd_mix_set(cd_decode_vol[0][0], cd_decode_vol[0][1], cd_decode_vol[1][0], cd_decode_vol[1][1], cd_muted && cdda_playing);
++    if (cdda_playing)
++        cdda_feed_audio();
+     if (!cdda_playing) {
+         deliver_cdda_data_end();
+         return;
+@@ -1853,25 +1899,8 @@
+ 
+     int delivered = 0;
+     while (cdda_playing && cdda_delay <= 0 && delivered < 16) {
+-        uint8_t raw[RAW_SECTOR_SIZE];
+-        int16_t pcm[CDDA_SECTOR_FRAMES * 2];
+-        if (!iso_read_raw_sector(iso_handle, cdda_lba, raw, sizeof(raw))) {
+-            memset(pcm, 0, sizeof(pcm));
+-        } else {
+-            /* BIN/CUE CD-DA sectors store signed 16-bit interleaved stereo in
+-             * little-endian byte order. */
+-            for (int i = 0; i < CDDA_SECTOR_FRAMES * 2; ++i) {
+-                uint16_t u = (uint16_t)raw[i * 2 + 0] |
+-                             ((uint16_t)raw[i * 2 + 1] << 8);
+-                pcm[i] = (int16_t)u;
+-            }
+-        }
+-
+-        if (mode_reg & 0x04u) deliver_cdda_report(pcm);
+-
+-        if (cd_muted) memset(pcm, 0, sizeof(pcm));
+-        cd_apply_decode_volume(pcm, CDDA_SECTOR_FRAMES);
+-        spu_cd_audio_push(pcm, CDDA_SECTOR_FRAMES);
++        /* Local patch 0033: only where the drive's head is, as the game sees it: the sound was read ahead (cdda_feed_audio). */
++        if (mode_reg & 0x04u) deliver_cdda_report(cdda_last_pcm);
+         cdda_sectors_played++;
+         trace_cdrom('a', 0, cdda_lba, (uint32_t)cdda_track);
+ 
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -3566,7 +3566,24 @@
+  * sdl_audio_fadein_left is declared with present_session_reset. */
+ static const int sdl_audio_fade_samples = 44100 * 40 / 1000;  /* 40 ms */
+ 
++/* Local patch 0033: the speaker asks, and exactly that is mixed. See spu.c. */
++static bool s_audio_native = false;
++static void sdl_native_callback(void* /*user*/, Uint8* stream, int len) {
++    int16_t* out = reinterpret_cast<int16_t*>(stream);
++    const int frames = len / (int)(2 * sizeof(int16_t));
++    spu_mix_for_device(out, frames);
++    const int vol = host_volume_get();
++    if (vol < 100) {
++        const float g = (float)vol / 100.0f;
++        sdl_audio_gain_ramp(out, frames, g, g);
++    }
++}
++
+ static void sdl_audio_pump(bool discard_output = false) {
++    if (s_audio_native) {
++        spu_deliver_mixer_irq();
++        return;
++    }
+     /* Guest-cycle SPU advance must not depend on host audio device/backpressure.
+      * Win↔Linux rollback forked on aux/spu when one peer skipped spu_render
+      * (queue full / !drc / no device) while the other kept advancing. */
+@@ -3733,6 +3750,14 @@
+ {
+     *legacy = audio_legacy_mode() ? 1 : 0;
+     *host_rate = g_audio_host_rate;
++    if (s_audio_native) {	/* Local patch 0033: no bridge: what's held is the CD's, no correction ever */
++        *fill_ms = (double)spu_cd_audio_fill() / 44.1;
++        *target_ms = 400.0;
++        *underruns = spu_cd_audio_underflows();
++        *overflow_drops = spu_cd_audio_overflows();
++        *correction = 0.0;
++        return 1;
++    }
+     if (*legacy || !s_drc_ready) {
+         *fill_ms = sdl_audio_device
+                    ? (double)psx_sdl_audio_queued_size(sdl_audio_device)
+@@ -4143,6 +4168,11 @@
+ }
+ 
+ static void sdl_audio_update(int hard_mute_active, int turbo_sink_active) {
++    if (s_audio_native) {	/* Local patch 0033: nothing to gate: sound goes on as the chip's state says, as on a console */
++        s_audio_gate = AUDIO_GATE_NORMAL;
++        sdl_audio_pump(false);
++        return;
++    }
+     {   /* Tag audio events with the vblank frame counter. */
+         extern uint64_t s_frame_count;
+         audio_trace_note_frame((uint32_t)s_frame_count);
+@@ -16231,19 +16261,18 @@
+         want.freq = g_audio_freq;
+         want.format = AUDIO_S16SYS;
+         want.channels = 2;
+-        want.samples = 1024;
++        want.samples = 512;		/* Local patch 0033: note starts land to this */
+         const bool legacy = audio_legacy_mode();
+-        want.allow_frequency_change = legacy ? 0 : 1;
++        want.allow_frequency_change = 0;
++        s_audio_native = !legacy;
++        (void)sdl_drc_callback;
+         if (!legacy)
+-            want.callback = sdl_drc_callback;  /* pull model: bridge resamples + DRC */
++            want.callback = sdl_native_callback;
+         sdl_audio_device = psx_sdl_audio_open(&want, &have);
+         if (sdl_audio_device) {
+             if (!legacy) {
+-                rab_config cfg; rab_config_defaults(&cfg);
+-                cfg.channels    = 2;
+-                cfg.source_rate = 44100.0;            /* SPU render rate */
+-                cfg.host_rate   = (double)have.freq;  /* actual device rate */
+-                if (rab_init(&s_drc, &cfg) == 0) s_drc_ready = true;
++                spu_native_audio_on();
++                std::printf("psxrecomp: sound: mixed for the device, %d Hz, %d frames a time, nothing resampled\n", have.freq, (int)have.samples);
+             }
+             g_audio_host_rate = have.freq;
+             audio_trace_set_tap_rate(AUDIO_TAP_HOST, (uint32_t)have.freq);
+--- a/runtime/src/spu.c
++++ b/runtime/src/spu.c
+@@ -16,6 +16,9 @@
+  * oracle comparison can quantify them from OUTPUT, not source.
+  */
+ 
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
+ #include "spu.h"
+ #include "spu_gauss.h"
+ #include "spu_shadow.h"
+@@ -26,6 +29,25 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <pthread.h>
++
++/* Local patch 0033: a native port has no console clock its sound must keep to. The game's thread only sets the sound
++ * chip's state (these calls, briefly locked) and never waits for sound; the audio device's thread mixes exactly what
++ * the speaker asks for, whatever the frame rate: no resampling, nothing stretched, and a frame late is no gap. */
++static pthread_mutex_t spu_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
++static inline void spu_unlock_scope(int *unused) { (void)unused; pthread_mutex_unlock(&spu_lock); }
++#define SPU_LOCKED pthread_mutex_lock(&spu_lock); int spu_scope_ __attribute__((cleanup(spu_unlock_scope), unused)) = 0
++static int spu_native_mode = 0;
++static __thread int spu_in_mixer = 0;
++static uint32_t spu_mixer_irq = 0;		/* an IRQ the mixer raised: address | 1, for the game's thread */
++static unsigned long long spu_mixed = 0;
++/* CD audio: its sectors come on the game's thread and go out on the speaker's, so plenty is kept in hand. */
++#define CD_START_FRAMES  (44100u / 10u)			/* 100 ms before it starts or starts again */
++#define CD_TARGET_FRAMES (44100u * 4u / 10u)	/* 400 ms held by a stream: what spu_cd_pace steers to */
++static int cd_buffering = 1;
++static uint64_t cd_underflow_events = 0;
++static uint8_t cd_mix[4] = { 0x80, 0, 0, 0x80 };	/* L to L, L to R, R to L, R to R: as played, for what was read ahead */
++static int cd_mix_muted = 0;
+ 
+ #define SPU_RAM_SIZE       (512 * 1024)
+ #define SPU_REG_COUNT      256
+@@ -399,7 +421,10 @@
+         if ((u & 0xFFFFu) == target) {
+             if (!irq_flag) {
+                 irq_flag = 1;
+-                psx_irq_raise(9u, u << 3);
++                if (spu_in_mixer)
++                    __atomic_store_n(&spu_mixer_irq, (u << 3) | 1u, __ATOMIC_RELEASE);
++                else
++                    psx_irq_raise(9u, u << 3);
+                 spu_event_record(SPU_EV_IRQ, 0xFF, u << 3);
+             }
+             return;
+@@ -414,6 +439,8 @@
+ }
+ 
+ void spu_cd_audio_reset(void) {
++    SPU_LOCKED;
++    cd_buffering = 1;
+     memset(cd_ring, 0, sizeof(cd_ring));
+     cd_read_pos = 0;
+     cd_write_pos = 0;
+@@ -425,6 +452,7 @@
+ 
+ void spu_cd_audio_push(const int16_t* stereo, int frames) {
+     if (!stereo || frames <= 0) return;
++    SPU_LOCKED;
+ 
+     uint32_t in_frames = (uint32_t)frames;
+     if (in_frames > SPU_CD_RING_FRAMES) {
+@@ -459,6 +487,25 @@
+ }
+ 
+ static int cd_audio_pop(int16_t* left, int16_t* right) {
++    if (spu_native_mode) {
++        if (cd_buffering) {
++            if (cd_frame_count < CD_START_FRAMES) return 0;
++            cd_buffering = 0;
++        }
++        if (cd_frame_count == 0) {
++            cd_buffering = 1;
++            cd_underflow_events++;
++            return 0;
++        }
++        const int32_t l = cd_ring[cd_read_pos * 2u + 0u], r = cd_ring[cd_read_pos * 2u + 1u];
++        const int32_t lo = cd_mix_muted ? 0 : ((l * cd_mix[0]) >> 7) + ((r * cd_mix[2]) >> 7);
++        const int32_t ro = cd_mix_muted ? 0 : ((l * cd_mix[1]) >> 7) + ((r * cd_mix[3]) >> 7);
++        *left = (int16_t)(lo > 32767 ? 32767 : lo < -32768 ? -32768 : lo);
++        *right = (int16_t)(ro > 32767 ? 32767 : ro < -32768 ? -32768 : ro);
++        cd_read_pos = (cd_read_pos + 1u) % SPU_CD_RING_FRAMES;
++        cd_frame_count--;
++        return 1;
++    }
+     if (cd_frame_count == 0) return 0;
+     *left = cd_ring[cd_read_pos * 2u + 0u];
+     *right = cd_ring[cd_read_pos * 2u + 1u];
+@@ -965,6 +1012,7 @@
+ }
+ 
+ void spu_init(void) {
++    SPU_LOCKED;
+     memset(spu_ram, 0, sizeof(spu_ram));
+     memset(spu_regs, 0, sizeof(spu_regs));
+     memset(voices, 0, sizeof(voices));
+@@ -1358,6 +1406,7 @@
+ }
+ 
+ uint32_t spu_read(uint32_t addr) {
++    SPU_LOCKED;
+     if (addr >= 0x1F801C00u && addr <= 0x1F801DFFu) {
+         uint32_t idx = reg_index(addr);
+         if (idx < SPU_REG_COUNT) {
+@@ -1450,6 +1499,7 @@
+ }
+ 
+ void spu_write(uint32_t addr, uint32_t value) {
++    SPU_LOCKED;
+     if (addr >= 0x1F801C00u && addr <= 0x1F801DFFu) {
+         uint32_t idx = reg_index(addr);
+         if (idx < SPU_REG_COUNT) {
+@@ -1556,6 +1606,7 @@
+ }
+ 
+ void spu_dma_write(uint32_t word) {
++    SPU_LOCKED;
+     spu_irq_check(transfer_addr, 4u);
+     if (transfer_addr + 3 < SPU_RAM_SIZE) {
+         spu_ram[transfer_addr]     = (uint8_t)(word & 0xFF);
+@@ -1571,6 +1622,7 @@
+  * exact mirror of spu_dma_write. Titles carry state through SPU RAM across
+  * EXE transitions via this path; returning zeros breaks them. */
+ uint32_t spu_dma_read(void) {
++    SPU_LOCKED;
+     uint32_t word = 0;
+     spu_irq_check(transfer_addr, 4u);
+     if (transfer_addr + 3 < SPU_RAM_SIZE) {
+@@ -1583,6 +1635,46 @@
+     return word;
+ }
+ 
++void spu_native_audio_on(void) { spu_native_mode = 1; }
++int spu_native_audio(void) { return spu_native_mode; }
++
++void spu_mix_for_device(int16_t* out_stereo, int frames) {
++    spu_in_mixer = 1;
++    while (frames > 0) {
++        const int chunk = frames > 64 ? 64 : frames;	/* the lock let go between: the game's thread waits for one at most */
++        {
++            SPU_LOCKED;
++            spu_render(out_stereo, chunk);
++            spu_mixed += (unsigned long long)chunk;
++        }
++        out_stereo += chunk * 2;
++        frames -= chunk;
++    }
++}
++
++void spu_deliver_mixer_irq(void) {
++    const uint32_t irq = __atomic_exchange_n(&spu_mixer_irq, 0u, __ATOMIC_ACQ_REL);
++    if (irq != 0u)
++        psx_irq_raise(9u, irq & ~1u);
++}
++
++void spu_cd_mix_set(uint8_t l_to_l, uint8_t l_to_r, uint8_t r_to_l, uint8_t r_to_r, int muted) {
++    cd_mix[0] = l_to_l, cd_mix[1] = l_to_r, cd_mix[2] = r_to_l, cd_mix[3] = r_to_r;
++    cd_mix_muted = muted;
++}
++
++double spu_cd_pace(void) {
++    if (!spu_native_mode) return 1.0;
++    const double held = (double)__atomic_load_n(&cd_frame_count, __ATOMIC_RELAXED);
++    const double pace = 1.0 + 0.5 * ((double)CD_TARGET_FRAMES - held) / (double)CD_TARGET_FRAMES;
++    return pace < 0.8 ? 0.8 : pace > 1.5 ? 1.5 : pace;
++}
++
++uint32_t spu_cd_audio_fill(void) { return __atomic_load_n(&cd_frame_count, __ATOMIC_RELAXED); }
++uint64_t spu_cd_audio_underflows(void) { return cd_underflow_events; }
++uint64_t spu_cd_audio_overflows(void) { return cd_overflow_frames; }
++unsigned long long spu_mixed_frames(void) { return spu_mixed; }
++
+ int spu_dma_ready(void) {
+     return 1;
+ }

@@ -151,6 +151,56 @@ bool Panel::init(vk::Device device, bool native, std::string& error, uint32_t sm
 	return true;
 }
 
+// The Brick's panel refreshes at about 60.23 Hz, an NTSC PlayStation at about 59.82 Hz. While a module runs, the DSI
+// controller's frame is 789 lines instead of 784: about 59.85 Hz, close to the console, and what the emulator runs its
+// games at. The display driver offers no way to it (DISP_LCD_SET_FPS fails). Deadstation's launch.sh restores it, should a
+// module crash. Sound doesn't care: it's mixed for the speaker, not by frames (PSXRecomp patch 0033).
+static constexpr uintptr_t DsiBase = 0x06504000;	// DSI0 (the display node's reg)
+static constexpr uint32_t DsiFrameReg = 0x1c;		// lines a frame << 16 | lines shown
+static constexpr uint32_t BrickFrame = (784u << 16) | 768u;
+static constexpr uint32_t GameFrame = (789u << 16) | 768u;
+
+static volatile uint32_t *mapDsi(int& memFd, void *& map)
+{
+	memFd = open("/dev/mem", O_RDWR | O_SYNC);
+	if (memFd < 0)
+		return nullptr;
+	map = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, memFd, DsiBase);
+	if (map == MAP_FAILED)
+	{
+		::close(memFd);
+		return nullptr;
+	}
+	return (volatile uint32_t *)((uint8_t *)map + DsiFrameReg);
+}
+
+bool Panel::matchRate()
+{
+	int memFd;
+	void *map;
+	volatile uint32_t *frame = mapDsi(memFd, map);
+	if (frame == nullptr)
+	{
+		DS_LOG("panel: the DSI's timing can't be reached: %s", strerror(errno));
+		return false;
+	}
+	const uint32_t found = *frame;
+	// the Brick's own timing, or what a run that was killed left (Deadcast's is 788 lines)
+	const bool brick = (found & 0xffff) == 768 && (found >> 16) >= 784 && (found >> 16) <= 790;
+	if (brick)
+	{
+		*frame = GameFrame;
+		rateChanged = true;
+		refresh *= 784.f / 789.f;
+		DS_LOG("panel: 789 lines a frame (was %u): about %.3f Hz", found >> 16, refresh);
+	}
+	else
+		DS_LOG("panel: the DSI's frame is %08x, not the Brick's: left as it is", found);
+	munmap(map, 0x1000);
+	::close(memFd);
+	return brick;
+}
+
 void Panel::term()
 {
 	if (thread.joinable())
@@ -161,6 +211,21 @@ void Panel::term()
 		}
 		changed.notify_all();
 		thread.join();
+	}
+	if (rateChanged)
+	{
+		int memFd;
+		void *map;
+		if (volatile uint32_t *frame = mapDsi(memFd, map))
+		{
+			if (*frame == GameFrame)
+				*frame = BrickFrame;
+			munmap(map, 0x1000);
+			::close(memFd);
+		}
+		else
+			DS_LOG("panel: the DSI's timing can't be restored: %s", strerror(errno));
+		rateChanged = false;
 	}
 	views.clear();
 	images.clear();

@@ -34,6 +34,8 @@ public:
 	vk::ImageView view(uint32_t page) const { return *views[page]; }
 	vk::Image image(uint32_t page) const { return *images[page]; }
 	float refreshRate() const { return refresh; }
+	// the panel at an NTSC game's rate until term: refreshRate then says so. False, with the reason in the log, if it can't be
+	bool matchRate();
 
 	// the frame on the screen as RGB rows, read back from fb0
 	bool readShown(std::vector<uint8_t>& rgb, int& width, int& height);
@@ -96,6 +98,7 @@ private:
 	bool pictureMode = false;		// fb0 in NextUI's mode for them
 	std::atomic<bool> modeAtFrame { false };	// to Deadstation's mode with the next frame shown
 	float refresh = 60.f;
+	bool rateChanged = false;		// matchRate changed the DSI's frame
 	vk::UniqueDeviceMemory memory;
 	std::vector<vk::UniqueImage> images;
 	std::vector<vk::UniqueImageView> views;

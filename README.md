@@ -28,6 +28,10 @@ shaders and code, and the SDK gives it the place to put them:
 - `deadstation_world_shaders`, `deadstation_world_numbers` (`brick/replay.h`): its own shaders for a world mesh, and numbers for them each frame.
 - `deadstation_module_shaders`, `deadstation_module_sources` (`brick/brick.cmake`): how its CMakeLists.txt builds them.
 
+## Pace and sound
+
+A module runs at the emulator's pace: the panel at 789 lines a frame, about 59.85 Hz, close to a real PlayStation, while it runs (`Panel::matchRate`). Sound isn't tied to that. It's mixed on the audio device's thread, exactly what the speaker asks for, with nothing resampled or stretched (PSXRecomp patch 0033); the game's thread only sets the sound chip's state. An audio track is read a second ahead of the drive's head as the game sees it. A module with its own CD feed steers by `spu_cd_pace()` and holds about 400 ms.
+
 ## A module's repository
 
 ```
