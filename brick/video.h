@@ -12,8 +12,7 @@
 #include <thread>
 #include <vector>
 
-// Something drawn with each frame (a recomp module's 3D layer: recomp/brick/scene_light.h): its own passes
-// before the page's, then its drawing over the frame, in the page's commands.
+// Something a module draws with each frame, over what the game drew: its own passes before the frame, and its drawing in it. A module has one by giving deadstation_module_layer.
 class VideoLayer
 {
 public:
@@ -34,9 +33,13 @@ public:
 		float uvMin[2];
 	};
 	virtual ~VideoLayer() = default;
+	virtual bool init(const Target& target, std::string& error) = 0;
+	virtual void term() = 0;			// (its GPU objects gone, the device still here)
 	virtual void prepare(vk::CommandBuffer cmd, uint32_t page) = 0;
 	virtual void draw(vk::CommandBuffer cmd, uint32_t page, vk::DescriptorSet frame, const Frame& f) = 0;
 };
+// The module's, if it has one (it stays its own, and lives as long as the program)
+extern "C" __attribute__((weak)) VideoLayer *deadstation_module_layer(void);
 
 class Video
 {

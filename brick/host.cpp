@@ -6,7 +6,6 @@
 #include "log.h"
 #include "psx_gpu.h"
 #include "replay.h"
-#include "scene_light.h"
 #include "video.h"
 
 #include <SDL.h>
@@ -92,7 +91,7 @@ namespace
 {
 // never destroyed: at exit the Vulkan driver may be gone before static destructors run
 Video& video = *new Video;
-SceneLight& sceneLight = *new SceneLight;	// the module's 3D layer lit per pixel (scene.h), when its plugin publishes one
+VideoLayer *moduleLayer = nullptr;	// (deadstation_module_layer)
 bool tried = false;
 // DEADSTATION_PERF: a line a second, frames shown, the longest gap between two, the time spent waiting for a page
 bool perf = false;
@@ -268,7 +267,8 @@ void hostTeardown()
 	if (consoleLevelWas > 0)
 		klogctl(8, nullptr, consoleLevelWas), consoleLevelWas = 0;
 	video.setLayer(nullptr);
-	sceneLight = SceneLight();
+	if (moduleLayer != nullptr)
+		moduleLayer->term();
 	video.term();
 }
 
@@ -357,8 +357,8 @@ Video& hostVideo()
 		// DEADSTATION_RESOLUTION=1024: fb0 at the panel's own size; 640 or 320: that, at 4:3, the display engine scaling it up (the module's Resolution setting picks it)
 		const char *res = getenv("DEADSTATION_RESOLUTION");
 		std::string error;
-		// DEADSTATION_SCENE_LIGHT: the module's plugin publishes its models (run.sh sets it with the plugin's switch)
-		const bool layered = getenv("DEADSTATION_SCENE_LIGHT") != nullptr;
+		moduleLayer = deadstation_module_layer != nullptr ? deadstation_module_layer() : nullptr;
+		const bool layered = moduleLayer != nullptr;
 		// frames up to 1280 x 1024: the runtime's internal resolution at 2x (PSX_INTERNAL_RESOLUTION, run.sh)
 		// DEADSTATION_ASYNC_SUBMIT (comparisons): the driver's submissions on a thread of their own. Off: PowerVR's driver
 		// holds one lock per process across a submission, so the module's other Vulkan calls wait for it anyway.
@@ -378,10 +378,10 @@ Video& hostVideo()
 			DS_LOG("recomp module: no screen: %s", error.c_str());
 		else if (layered)
 		{
-			if (sceneLight.init(video.layerTarget(), error))
-				video.setLayer(&sceneLight);
+			if (moduleLayer->init(video.layerTarget(), error))
+				video.setLayer(moduleLayer);
 			else
-				DS_LOG("recomp module: no 3D layer: %s", error.c_str());
+				DS_LOG("recomp module: the module's layer failed: %s", error.c_str());
 		}
 	}
 	return video;

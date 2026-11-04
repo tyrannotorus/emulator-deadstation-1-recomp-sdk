@@ -42,20 +42,16 @@ struct DeadstationTriangle
 	uint16_t page, clut;
 	uint8_t raw, semi;		// semi: 0 none, 1 + the blend mode
 	// How far behind what lies over it, in 32s of depth (negative: in front), for a game that layers polygons by the order it draws them rather than where they are: tested and
-	// written that much farther off, seen where it is. So a road stays on the hill it was laid over though the hill's surface comes up through it here and there, and a
-	// car on the road though its wheels go a little into it.
+	// written that much farther off, seen where it is. So what was laid over a surface stays over it though that surface comes up through it here and there.
 	int8_t layer;
 };
 extern "C" void deadstation_triangles(const DeadstationTriangle *triangles, size_t count);
 
-// semi for a polygon that isn't the world's but a beam over it (shaders/psx_gpu_spot.frag): its rgb where its corner lies in the beam (red
-// along, green across, blue the strength), drawn on the polygon already there, added, with no depth written.
-constexpr uint8_t DeadstationBeam = 0x80;
-// semi for a solid polygon in the order it's given among others (a car's, whose decals lie on its panels as the game ordered them): tested
+// semi for a solid polygon in the order it's given among others (a model whose decals lie on its panels as the game ordered them): tested
 // against the depth, none written; then deadstation_depth_only writes theirs, for what's drawn after.
 constexpr uint8_t DeadstationPainted = 0x81;
 
-// Light a plugin adds to the frame so far (a stage's mist): untextured, in full colour, each corner its own 0xBBGGRR, added to what is
+// Light a plugin adds to the frame so far: untextured, in full colour, each corner its own 0xBBGGRR, added to what is
 // there. z: its true depth, behind what's nearer and moved with its object in an in-between frame (replay.h); 0 (or left out): none, over
 // everything, where it is. One block to the render thread and one draw there. Corners as above; a frame not in a scene draws none.
 struct DeadstationGlow
@@ -69,7 +65,7 @@ extern "C" void deadstation_glows(const DeadstationGlow *glows, size_t count);
 // an in-between frame. A few, near to far, are fog with distance over everything that has a depth.
 extern "C" void deadstation_veil(const DeadstationGlow *glows, size_t count);
 // A shadow on what's drawn: each spot once (the stencil), tested against the depth. darken: blended half way to its colour, as the PlayStation's
-// shadows; else no colour at all, it only keeps a beam (DeadstationBeam) from reaching there: what a shadow is, to a light.
+// shadows; else no colour at all, it only marks the stencil.
 extern "C" void deadstation_shadows(const DeadstationGlow *polygons, size_t count, int darken);
 extern "C" void deadstation_depth_only(const DeadstationGlow *polygons, size_t count);
 
@@ -109,19 +105,31 @@ struct DeadstationWorldCamera
 	float ofx, ofy, h;		// the view on the game's screen: x = ofx + h * view x / view z
 	float drawX, drawY;		// and the screen in VRAM
 };
-// Beam: the world to its axes, in world units, each a linear form: x, y, z, constant
-struct DeadstationWorldBeam
-{
-	float along[4], across[4], height[4], strength;
-};
 extern "C" void deadstation_world_load(const DeadstationWorldTriangle *triangles, size_t count, unsigned cells);
 // The cells (ascending), the world's light the tint (deadstation_tint), in order with what's drawn
 // parts: 1 what's solid, 2 what's cut out, near to far. The cells near to far. (Solid first and the sky next, for what's behind it to cost nothing; then what's cut out.)
 extern "C" void deadstation_world_draw(const DeadstationWorldCamera *camera, const uint16_t *cells, size_t count, int parts);
 // Where in VRAM (x, y, w, h, each) the game will load other texels during a race. Before the load: what's there now says nothing about what's cut out of them later.
 extern "C" void deadstation_world_animated(const int16_t *rects, size_t count);
-// Lights for what's drawn from now on, in its one drawing: the nearest beam for each pixel on what's solid, at the corners on what's cut out and on quads; the other at the corners on everything.
-extern "C" void deadstation_world_lights(const DeadstationWorldBeam *nearest, const DeadstationWorldBeam *other);
+// A module's own shaders for its world, for lighting it its own way: SPIR-V, given before the first frame (deadstation_module_start). They take what the SDK's take, and the same push constants
+// (shaders/psx_gpu_world.vert), with float numbers[DeadstationWorldNumbers] after them, whatever the module wants them to mean. vert: for all of the world's polygons, in place of the SDK's. solidVert,
+// solidFrag, solidEdgeFrag (all or none; the fragment ones as psx_gpu_world_opaque.frag and psx_gpu_world_edge.frag): for what's solid, while deadstation_world_numbers says so.
+constexpr int DeadstationWorldNumbers = 28;
+struct DeadstationWorldShaders
+{
+	const uint32_t *vert;
+	size_t vertBytes;
+	const uint32_t *solidVert;
+	size_t solidVertBytes;
+	const uint32_t *solidFrag;
+	size_t solidFragBytes;
+	const uint32_t *solidEdgeFrag;
+	size_t solidEdgeFragBytes;
+};
+extern "C" void deadstation_world_shaders(const DeadstationWorldShaders *shaders);
+// The numbers for what's drawn from now on: solid for the mesh's solid polygons, others for what's cut out and solid quads (nullptr: zeros; what's added or blended has zeros). ownSolid: what's solid
+// drawn with the module's solid shaders.
+extern "C" void deadstation_world_numbers(const float *solid, const float *others, int ownSolid);
 // A sky: a mesh of its own, seen from where the camera is whatever its place. page 0xFFFF: no texture, its colour as it is.
 extern "C" void deadstation_world_sky_load(const DeadstationWorldTriangle *triangles, size_t count);
 extern "C" void deadstation_world_sky(const DeadstationWorldCamera *camera);

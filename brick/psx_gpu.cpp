@@ -17,15 +17,10 @@ extern "C" { void (*psx_gpu_triangle_source_hook)(uint32_t addr) = nullptr; }
 #include "psx_gpu_cached_frag.h"
 #include "psx_gpu_cached_opaque_frag.h"
 #include "psx_gpu_lean_vert.h"
-#include "psx_gpu_spot_vert.h"
-#include "psx_gpu_spot_frag.h"
 #include "psx_gpu_world_vert.h"
 #include "psx_gpu_world_frag.h"
 #include "psx_gpu_world_opaque_frag.h"
-#include "psx_gpu_world_lit_vert.h"
-#include "psx_gpu_world_lit_frag.h"
 #include "psx_gpu_world_sky_vert.h"
-#include "psx_gpu_world_edge_lit_frag.h"
 #include "psx_gpu_world_edge_frag.h"
 #include "psx_gpu_world_sky_frag.h"
 #include "psx_gpu_lean_frag.h"
@@ -78,7 +73,8 @@ struct Push
 	float rect[4];
 };
 
-enum Kind : uint32_t { Flat, Tex, Blit, Pack, Cached, Decode, CachedOpaque, Lean, LeanOpaque, Spot, World, WorldOpaque, WorldLit, WorldSky, WorldEdgeLit, WorldEdge };
+// (their numbers are in modules' lists of pipelines, pipelines.keys: one that's gone keeps its place)
+enum Kind : uint32_t { Flat, Tex, Blit, Pack, Cached, Decode, CachedOpaque, Lean, LeanOpaque, KindRetired, World, WorldOpaque, WorldOwnSolid, WorldSky, WorldOwnEdge, WorldEdge };
 // a pipeline key's bit: drawn into a native scene (its render pass, with its depth buffer)
 constexpr uint32_t SceneBit = 1u << 22;
 constexpr uint32_t StencilMark = 1u << 24;	// a shadow's polygons: no colour, a spare bit of the stencil where not already darkened
@@ -92,19 +88,20 @@ struct WorldVertex
 	uint8_t u, v, flags, slot;
 	uint8_t r, g, b, a;
 };
+DeadstationWorldShaders worldShadersGiven {};	// (a module's, deadstation_world_shaders)
+struct WorldNumbersOp { float numbers[2][DeadstationWorldNumbers]; int ownSolid; };
 struct WorldPush
 {
-	float rows[12], project[4], a[4], b[4], c[4], d[4];	// (a tint, b fog's colour and most, c its range, d each light's strength; a beam's: a along, b across, c height, d strength and fog)
-	float lights[2][12];	// the lights at the corners, each along, across, height
+	float rows[12], project[4], a[4], b[4], c[4];	// (a tint, b fog's colour and most, c its range)
+	float numbers[DeadstationWorldNumbers];	// a module's own world shaders' (deadstation_world_numbers)
 };
 constexpr vk::Format SceneFormat = vk::Format::eB8G8R8A8Unorm;	// a page's (Panel::format()): a whole frame is drawn straight into one
 constexpr int VeilBlend = 5;	// past the PlayStation's four: a plugin's fog (deadstation_veil)
-constexpr int BlockBlend = 6;	// no colour: a shadow only for a beam (deadstation_shadows)
+constexpr int BlockBlend = 6;	// no colour: it only marks the stencil (deadstation_shadows)
 constexpr int DarkenBlend = 7;	// what's there times the colour: a shadow, which can't lighten what's darker than it
 // the texture cache: texture pages decoded (through their CLUTs) into 256 x 256 slots of an RGBA atlas, so a textured
 // fragment takes one fetch, not two dependent ones and the decoding (psx_gpu_cached.frag)
-// 256 slots: a busy 3D scene uses more than 128 pages through their CLUTs (two fighters' palettes, the stage, the
-// HUD), and with 128 the least recently used were decoded again every frame
+// 256 slots: a busy 3D scene uses more than 128 pages through their CLUTs, and with 128 the least recently used were decoded again every frame
 constexpr int AtlasW = 4096, AtlasH = 4096, TexSlots = (AtlasW / 256) * (AtlasH / 256);
 constexpr int SlotWords = TexSlots / 64;
 static_assert(TexSlots == 256, "slot masks are four words");
@@ -180,10 +177,11 @@ struct State
 	vk::UniqueDescriptorPool pool;
 	vk::DescriptorSet set;
 	vk::UniquePipelineLayout layout;
-	vk::UniqueShaderModule vert, flat, tex, cached, cachedOpaque, leanVert, lean, leanOpaque, spotVert, spot, decode, rectVert, blit, pack;
-	vk::UniqueShaderModule worldVert, world, worldOpaque, worldLitVert, worldLit, worldSkyVert, worldSky, worldEdgeLit, worldEdge;
+	vk::UniqueShaderModule vert, flat, tex, cached, cachedOpaque, leanVert, lean, leanOpaque, decode, rectVert, blit, pack;
+	vk::UniqueShaderModule worldVert, world, worldOpaque, worldOwnVert, worldOwn, worldSkyVert, worldSky, worldOwnEdge, worldEdge;
 	std::vector<int16_t> animatedRects;
-	DeadstationWorldBeam worldLights[2] = {};
+	float worldNumbers[2][DeadstationWorldNumbers] = {};	// (what's solid in the mesh; what's cut out and solid quads)
+	bool worldOwnSolid = false;
 	uint32_t worldPushSize = sizeof(WorldPush);
 	float fogNear = 0, fogScale = 0, fogMost = 0, fogRgb[3] = {};
 	vk::UniqueBuffer skyBuffer;
@@ -547,15 +545,15 @@ vk::UniquePipeline buildPipeline(uint32_t key)
 	const bool check = stencil & 2, set = stencil & 1;
 	const bool stencilPass = (key >> 12) & 1;
 
-	const bool worldKind = kind == World || kind == WorldOpaque || kind == WorldLit || kind == WorldSky || kind == WorldEdgeLit || kind == WorldEdge;
+	const bool worldKind = kind == World || kind == WorldOpaque || kind == WorldOwnSolid || kind == WorldSky || kind == WorldOwnEdge || kind == WorldEdge;
 	vk::PipelineShaderStageCreateInfo stages[2] = {
 		{ vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eVertex,
-				kind == WorldSky ? *g.worldSkyVert : kind == WorldLit || kind == WorldEdgeLit ? *g.worldLitVert : worldKind ? *g.worldVert :
-				kind == Spot ? *g.spotVert : kind == Lean || kind == LeanOpaque ? *g.leanVert :
+				kind == WorldSky ? *g.worldSkyVert : kind == WorldOwnSolid || kind == WorldOwnEdge ? *g.worldOwnVert : worldKind ? *g.worldVert :
+				kind == Lean || kind == LeanOpaque ? *g.leanVert :
 				kind == Flat || kind == Tex || kind == Cached || kind == CachedOpaque ? *g.vert : *g.rectVert, "main" },
 		{ vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eFragment,
-				kind == WorldEdge ? *g.worldEdge : kind == WorldSky ? *g.worldSky : kind == WorldEdgeLit ? *g.worldEdgeLit : kind == WorldLit ? *g.worldLit : kind == World ? *g.world : kind == WorldOpaque ? *g.worldOpaque :
-				kind == Spot ? *g.spot : kind == Lean ? *g.lean : kind == LeanOpaque ? *g.leanOpaque :
+				kind == WorldEdge ? *g.worldEdge : kind == WorldSky ? *g.worldSky : kind == WorldOwnEdge ? *g.worldOwnEdge : kind == WorldOwnSolid ? *g.worldOwn : kind == World ? *g.world : kind == WorldOpaque ? *g.worldOpaque :
+				kind == Lean ? *g.lean : kind == LeanOpaque ? *g.leanOpaque :
 				kind == Flat ? *g.flat : kind == Tex ? *g.tex : kind == Cached ? *g.cached : kind == CachedOpaque ? *g.cachedOpaque :
 				kind == Decode ? *g.decode :
 				kind == Blit ? *g.blit : *g.pack, "main" },
@@ -569,7 +567,7 @@ vk::UniquePipeline buildPipeline(uint32_t key)
 		{ 4, 0, vk::Format::eR32Sfloat, offsetof(Vertex, depth) },
 		{ 5, 0, vk::Format::eR32Sfloat, offsetof(Vertex, w) },
 	};
-	const bool geometry = kind == Flat || kind == Tex || kind == Cached || kind == CachedOpaque || kind == Lean || kind == LeanOpaque || kind == Spot || worldKind;
+	const bool geometry = kind == Flat || kind == Tex || kind == Cached || kind == CachedOpaque || kind == Lean || kind == LeanOpaque || worldKind;
 	vk::PipelineVertexInputStateCreateInfo input = geometry ?
 			vk::PipelineVertexInputStateCreateInfo(vk::PipelineVertexInputStateCreateFlags(), binding, attributes) :
 			vk::PipelineVertexInputStateCreateInfo();
@@ -672,6 +670,10 @@ void startPipelines()
 				if (g.pipelines.count(key) != 0)
 					continue;
 			}
+			// (one no module draws any more; one of shaders this module didn't give)
+			const uint32_t keyKind = key & 15;
+			if (keyKind == KindRetired || ((keyKind == WorldOwnSolid || keyKind == WorldOwnEdge) && !g.worldOwnVert))
+				continue;
 			vk::UniquePipeline made = buildPipeline(key);
 			std::lock_guard<std::mutex> hold(g.pipelineLock);
 			vk::UniquePipeline& kept = g.pipelines[key];
@@ -2666,16 +2668,17 @@ bool init()
 		g.tex = module(psx_gpu_tex_frag, sizeof(psx_gpu_tex_frag));
 		g.cached = module(psx_gpu_cached_frag, sizeof(psx_gpu_cached_frag));
 		g.cachedOpaque = module(psx_gpu_cached_opaque_frag, sizeof(psx_gpu_cached_opaque_frag));
-		g.spotVert = module(psx_gpu_spot_vert, sizeof(psx_gpu_spot_vert));
-		g.spot = module(psx_gpu_spot_frag, sizeof(psx_gpu_spot_frag));
-		g.worldVert = module(psx_gpu_world_vert, sizeof(psx_gpu_world_vert));
+		g.worldVert = worldShadersGiven.vert != nullptr ? module(worldShadersGiven.vert, worldShadersGiven.vertBytes) : module(psx_gpu_world_vert, sizeof(psx_gpu_world_vert));
 		g.world = module(psx_gpu_world_frag, sizeof(psx_gpu_world_frag));
 		g.worldOpaque = module(psx_gpu_world_opaque_frag, sizeof(psx_gpu_world_opaque_frag));
-		g.worldLitVert = module(psx_gpu_world_lit_vert, sizeof(psx_gpu_world_lit_vert));
-		g.worldLit = module(psx_gpu_world_lit_frag, sizeof(psx_gpu_world_lit_frag));
+		if (worldShadersGiven.solidVert != nullptr)
+		{
+			g.worldOwnVert = module(worldShadersGiven.solidVert, worldShadersGiven.solidVertBytes);
+			g.worldOwn = module(worldShadersGiven.solidFrag, worldShadersGiven.solidFragBytes);
+			g.worldOwnEdge = module(worldShadersGiven.solidEdgeFrag, worldShadersGiven.solidEdgeFragBytes);
+		}
 		g.worldSkyVert = module(psx_gpu_world_sky_vert, sizeof(psx_gpu_world_sky_vert));
 		g.worldSky = module(psx_gpu_world_sky_frag, sizeof(psx_gpu_world_sky_frag));
-		g.worldEdgeLit = module(psx_gpu_world_edge_lit_frag, sizeof(psx_gpu_world_edge_lit_frag));
 		g.worldEdge = module(psx_gpu_world_edge_frag, sizeof(psx_gpu_world_edge_frag));
 		{
 			const uint32_t pushMost = g.dev.physicalDevice.getProperties().limits.maxPushConstantsSize;
@@ -3087,8 +3090,8 @@ void bulkTriangles(const uint8_t *bytes, int count)
 	for (int i = 0; i < count; i++, bytes += sizeof(t))
 	{
 		std::memcpy(&t, bytes, sizeof(t));
-		const bool beam = t.semi == DeadstationBeam, painted = t.semi == DeadstationPainted;
-		if (t.semi != 0 && !beam && !painted)
+		const bool painted = t.semi == DeadstationPainted;
+		if (t.semi != 0 && !painted)
 		{
 			one(t);
 			s = &slot();
@@ -3116,14 +3119,13 @@ void bulkTriangles(const uint8_t *bytes, int count)
 		}
 		if (memoSlot < 0)
 		{
-			if (!beam)
-				one(t);
+			one(t);
 			s = &slot();
 			continue;
 		}
 		// no discard unless a transparent texel lies under it
-		uint32_t kind = beam ? Spot : Lean;
-		if (memoClass != 7 && !beam)
+		uint32_t kind = Lean;
+		if (memoClass != 7)
 		{
 			if (!(memoClass & 1))
 				kind = LeanOpaque;
@@ -3154,25 +3156,21 @@ void bulkTriangles(const uint8_t *bytes, int count)
 			v.u = (float)(t.uv[j] & 0xFF), v.v = (float)(t.uv[j] >> 8);
 			v.r = t.rgb[j] & 255, v.g = (t.rgb[j] >> 8) & 255, v.b = (t.rgb[j] >> 16) & 255, v.a = 0;
 			v.page = t.page, v.clutX = (uint16_t)memoSlot, v.clutY = clutY, v.flags = t.raw ? 1 : 0;
-			if (!beam)
-				tintCorner(v);
+			tintCorner(v);
 			const float z = t.z[j], zd = z + 32.f * (float)t.layer;
 			zs[j] = z;
 			if (perspective)
 				v.depth = scenePerspectiveDepth(zd), v.w = std::max(z, 1.f);
 			else
 				v.depth = sceneFlatDepth(zd), v.w = 1.f;
-			if (g.fogMost > 0 && !beam)
+			if (g.fogMost > 0)
 				v.a = (uint8_t)std::min(g.fogMost * std::sqrt(std::clamp((z - g.fogNear) * g.fogScale, 0.f, 1.f)) * 255.f, 255.f);
 			bx0 = std::min(bx0, t.x[j]), by0 = std::min(by0, t.y[j]), bx1 = std::max(bx1, t.x[j]), by1 = std::max(by1, t.y[j]);
 		}
 		std::memcpy(s->vertexMap + s->vertexUsed, built, sizeof(built));
 		const uint32_t first = (uint32_t)(s->vertexUsed / sizeof(Vertex));
 		s->vertexUsed += sizeof(built);
-		// (a beam: added, testing the depth of the polygon it lies on and writing none)
-		// (kept off what a shadow keeps it from: where the stencil is set)
-		const uint32_t key = beam ? Spot | (1u + 1u) << 4 | SceneBit | (g.stencilOn ? 2u << 8 | 1u << 12 : 0u) | 1u << 20 :
-				painted ? kind | SceneBit | stencilBits() | 1u << 20 : kind | baseKey;
+		const uint32_t key = painted ? kind | SceneBit | stencilBits() | 1u << 20 : kind | baseKey;
 		State::SceneDraw *last = g.sceneDraws.empty() ? nullptr : &g.sceneDraws.back();
 		if (last != nullptr && last->scene == si && last->count != 0 && last->key == key && !last->twoPasses && last->scissor == box &&
 				last->first + last->count == first && memcmp(&last->push, &p, sizeof(p)) == 0)
@@ -3202,7 +3200,7 @@ void bulkTriangles(const uint8_t *bytes, int count)
 }
 
 // A plugin's added light (replay.h): one draw into the scene, in the shader the PlayStation's untextured polygons use, at full colour
-// mode: 0 light added, 1 a veil, 2 a shadow darkening, 3 a shadow for beams alone, 4 depth alone
+// mode: 0 light added, 1 a veil, 2 a shadow darkening, 3 the stencil marked alone, 4 depth alone
 void bulkGlows(const uint8_t *bytes, int count, int mode)
 {
 	if (!g.ready || count <= 0)
@@ -3289,7 +3287,7 @@ void bulkGlows(const uint8_t *bytes, int count, int mode)
 	g.sceneDraws.push_back({ si, first, (uint32_t)count * 3, key, box, p, false, 0 });
 	if (recording)
 		record.draws.push_back({ si, recordFirst, (uint32_t)count * 3, key, box, p, false, 0 });
-	// A shadow: hundreds of polygons over each other, each one a blended object to this GPU if it were darkened as it's drawn: 8 ms a frame with the car near a wall. So they only mark the stencil,
+	// A shadow: hundreds of polygons over each other, each one a blended object to this GPU if it were darkened as it's drawn: 8 ms a frame close up. So they only mark the stencil,
 	// which runs no shader, and one quad over them darkens what they marked.
 	if (mode == 2)
 	{
@@ -3718,18 +3716,16 @@ void bWorldLoad(const DeadstationWorldTriangle *triangles, size_t count, unsigne
 	DS_LOG("recomp gpu: a world of %zu triangles in %d of the atlas's slots, %.1f MB", used / 3, (int)g.worldSlots.size(), (double)(used * sizeof(WorldVertex)) / 1048576.0);
 }
 
-// the race's light and fog, for what's drawn with the mesh's shaders
-void worldLook(WorldPush& push, bool nearLight = false, bool otherLight = false)
+// the world's tint and fog, for what's drawn with the mesh's shaders, and a module's own shaders' numbers: which, 0 none, 1 the solid mesh's, 2 for the rest
+void worldLook(WorldPush& push, int which = 0)
 {
 	for (int i = 0; i < 3; i++)
 		push.a[i] = g.tinted ? (float)g.tint[i] / 256.f : 1.f, push.b[i] = g.fogRgb[i];
 	push.b[3] = g.fogMost, push.c[0] = g.fogNear, push.c[1] = g.fogScale;
-	// (where the device has too few bytes for them, the strengths stay 0: no light at the corners)
-	if (g.worldPushSize < sizeof(WorldPush))
+	// (where the device has too few bytes for them, they stay 0)
+	if (g.worldPushSize < sizeof(WorldPush) || which == 0)
 		return;
-	push.d[0] = nearLight ? g.worldLights[0].strength : 0.f, push.d[1] = otherLight ? g.worldLights[1].strength : 0.f;
-	for (int l = 0; l < 2; l++)
-		std::memcpy(push.lights[l], g.worldLights[l].along, sizeof(push.lights[l]));
+	std::memcpy(push.numbers, g.worldNumbers[which - 1], sizeof(push.numbers));
 }
 
 // the cells in view: a draw for each run of cells next to each other in the buffer, of each kind
@@ -3762,14 +3758,9 @@ void bWorldDraw(const DeadstationWorldCamera& camera, const uint16_t *cells, int
 	push.project[0] = camera.h * kx / 512.f, push.project[1] = camera.h * ky / 256.f;
 	push.project[2] = (camera.ofx + camera.drawX - (float)S.ax) * kx / 512.f - 1.f;
 	push.project[3] = (camera.ofy + camera.drawY - (float)S.ay) * ky / 256.f - 1.f;
-	// (what's solid has the near beam at its pixels, in this one drawing of it; what's cut out at its corners)
-	worldLook(push, (parts & 2) != 0, true);
-	const bool lit = (parts & 1) != 0 && g.worldLights[0].strength > 0 && g.worldPushSize == sizeof(WorldPush);
-	if (lit)
-	{
-		push.d[2] = g.worldLights[0].strength;
-		std::memcpy(push.lights[0], g.worldLights[0].along, sizeof(push.lights[0]));
-	}
+	// (what's solid by a module's own shaders, if it has given them and says so now)
+	const bool lit = (parts & 1) != 0 && g.worldOwnSolid && g.worldOwnVert && g.worldPushSize == sizeof(WorldPush);
+	worldLook(push, (parts & 1) != 0 ? 1 : 2);
 	const int pushAt = (int)g.worldPushes.size();
 	g.worldPushes.push_back(push);
 	const int sx0 = std::clamp(sceneX(S, g.area[0]), 0, (int)g.sceneW), sy0 = std::clamp(sceneY(S, g.area[1]), 0, (int)g.sceneH);
@@ -3787,7 +3778,7 @@ void bWorldDraw(const DeadstationWorldCamera& camera, const uint16_t *cells, int
 			continue;
 		const auto& runs = g.worldRuns[kind];
 		const uint16_t *order = cutOut ? cells : inBufferOrder.data();
-		uint32_t key = (cutOut ? World : kind >= 4 ? (lit ? WorldEdgeLit : WorldEdge) : (lit ? WorldLit : WorldOpaque)) | SceneBit | stencilBits() | 2u << 20;
+		uint32_t key = (cutOut ? World : kind >= 4 ? (lit ? WorldOwnEdge : WorldEdge) : (lit ? WorldOwnSolid : WorldOpaque)) | SceneBit | stencilBits() | 2u << 20;
 		if (!twoSided)
 			key |= CullBit;
 		uint32_t first = 0, length = 0;
@@ -3930,11 +3921,11 @@ void bWorldQuads(const DeadstationWorldCamera& camera, const uint8_t *bytes, int
 	const int si = worldScene(camera, push, box);
 	if (si < 0)
 		return;
-	// (what's solid in the light, at its corners: billboards and marks. What's added or blended, not)
+	// (what's solid takes a module's numbers, as the mesh's cut-outs. What's added or blended, not)
 	{
 		DeadstationWorldQuad first;
 		std::memcpy(&first, bytes, sizeof(first));
-		worldLook(push, first.semi == 0, first.semi == 0);
+		worldLook(push, first.semi == 0 ? 2 : 0);
 	}
 	int pushAt = (int)g.worldPushes.size();
 	g.worldPushes.push_back(push);
@@ -4065,7 +4056,7 @@ bool drawReplay(int scene)
 		float tr[3];
 		for (int i = 0; i < 3; i++)
 			tr[i] = a.t[i] - (rel[3 * i] * b.t[0] + rel[3 * i + 1] * b.t[1] + rel[3 * i + 2] * b.t[2]);
-		// a camera cut or a car put back on the track: no step
+		// a camera cut or an object put back in its place: no step
 		if (tr[0] * tr[0] + tr[1] * tr[1] + tr[2] * tr[2] > 4000.f * 4000.f || rel[0] + rel[4] + rel[8] < 2.0f)
 			continue;
 		for (int i = 0; i < 9; i++)
@@ -4612,9 +4603,12 @@ void run(const std::vector<uint8_t>& batch)
 			break;
 		}
 		case OpWorldLights:
-			g.worldLights[0] = get<DeadstationWorldBeam>(p);
-			g.worldLights[1] = get<DeadstationWorldBeam>(p);
+		{
+			const WorldNumbersOp n = get<WorldNumbersOp>(p);
+			std::memcpy(g.worldNumbers, n.numbers, sizeof(g.worldNumbers));
+			g.worldOwnSolid = n.ownSolid != 0;
 			break;
+		}
 		case OpWorldSky:
 		{
 			const DeadstationWorldCamera camera = get<DeadstationWorldCamera>(p);
@@ -5055,7 +5049,7 @@ void psx_gpu_release()
 	g.setLayout.reset();
 	g.sampler.reset();
 	g.samplerFiltered.reset();
-	g.vert.reset(), g.flat.reset(), g.tex.reset(), g.cached.reset(), g.cachedOpaque.reset(), g.leanVert.reset(), g.spotVert.reset(), g.spot.reset(), g.worldVert.reset(), g.world.reset(), g.worldOpaque.reset(), g.worldLitVert.reset(), g.worldLit.reset(), g.worldSkyVert.reset(), g.worldSky.reset(), g.worldEdgeLit.reset(), g.worldEdge.reset(), g.skyBuffer.reset(), g.skyMemory.reset(), g.worldLayout.reset(), g.worldBuffer.reset(), g.worldMemory.reset(), g.lean.reset(),
+	g.vert.reset(), g.flat.reset(), g.tex.reset(), g.cached.reset(), g.cachedOpaque.reset(), g.leanVert.reset(), g.worldVert.reset(), g.world.reset(), g.worldOpaque.reset(), g.worldOwnVert.reset(), g.worldOwn.reset(), g.worldSkyVert.reset(), g.worldSky.reset(), g.worldOwnEdge.reset(), g.worldEdge.reset(), g.skyBuffer.reset(), g.skyMemory.reset(), g.worldLayout.reset(), g.worldBuffer.reset(), g.worldMemory.reset(), g.lean.reset(),
 			g.leanOpaque.reset(), g.decode.reset(), g.rectVert.reset(), g.blit.reset(), g.pack.reset();
 	g.atlasFramebuffer.reset(), g.decodeFramebuffer.reset(), g.atlasPass.reset(), g.atlasDecodePass.reset();
 	g.drawFramebuffer.reset(), g.colorFramebuffer.reset(), g.packFramebuffer.reset();
@@ -5277,18 +5271,28 @@ extern "C" void deadstation_world_load(const DeadstationWorldTriangle *triangles
 }
 // (to measure with, by a module: kinds of the mesh left out, by bit)
 int deadstation_world_skip = 0;
-extern "C" void deadstation_world_lights(const DeadstationWorldBeam *nearest, const DeadstationWorldBeam *other)
+extern "C" void deadstation_world_shaders(const DeadstationWorldShaders *shaders)
 {
-	const DeadstationWorldBeam none {};
-	const DeadstationWorldBeam a = nearest != nullptr ? *nearest : none, b = other != nullptr ? *other : none;
+	worldShadersGiven = *shaders;
+}
+extern "C" void deadstation_world_numbers(const float *solid, const float *others, int ownSolid)
+{
+	WorldNumbersOp n {};
+	if (solid != nullptr)
+		std::memcpy(n.numbers[0], solid, sizeof(n.numbers[0]));
+	if (others != nullptr)
+		std::memcpy(n.numbers[1], others, sizeof(n.numbers[1]));
+	n.ownSolid = ownSolid;
 	if (rt::on)
 	{
 		rt::putOp(rt::OpWorldLights);
-		rt::putBytes(&a, sizeof(a));
-		rt::putBytes(&b, sizeof(b));
+		rt::putBytes(&n, sizeof(n));
 	}
 	else
-		g.worldLights[0] = a, g.worldLights[1] = b;
+	{
+		std::memcpy(g.worldNumbers, n.numbers, sizeof(g.worldNumbers));
+		g.worldOwnSolid = ownSolid != 0;
+	}
 }
 extern "C" void deadstation_scene_whole(float r, float g_, float b)
 {

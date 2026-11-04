@@ -19,6 +19,15 @@ this SDK's patches by `tools/prepare-psxrecomp.sh`.
    module only for those discs.
 4. **Whatever a module lets the player choose is a setting declared in its manifest,** shown in Options.
 
+## What's generic here, and what's the game's
+
+This SDK helps make a recomp. It holds nothing of any one game: a game's lights, moods, menus and fixes are its module's, in its plugin. Where a module needs to draw in its own way, it brings its own
+shaders and code, and the SDK gives it the place to put them:
+
+- `deadstation_module_layer` (`brick/video.h`): a `VideoLayer` of its own, drawn with each frame over what the game drew.
+- `deadstation_world_shaders`, `deadstation_world_numbers` (`brick/replay.h`): its own shaders for a world mesh, and numbers for them each frame.
+- `deadstation_module_shaders`, `deadstation_module_sources` (`brick/brick.cmake`): how its CMakeLists.txt builds them.
+
 ## A module's repository
 
 ```
