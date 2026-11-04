@@ -25,6 +25,7 @@ struct Params
 	float options[4];	// x: the models' sun shadows on themselves
 	float frameAt[4];	// xy: the frame's uv offset; zw: its smallest uv
 	float floorPlane[4], project[4];
+	float lightAim[6][4];	// a spotlight's axis, w: the cosine of half its cone (0: light all round)
 };
 
 constexpr float Bias = 40.f;	// the shadow map's slack, in view units (the game's depths come in steps of 32)
@@ -295,6 +296,7 @@ void SceneLight::prepare(vk::CommandBuffer cmd, uint32_t page)
 		const deadstation::scene::Light& l = scene.lights[i];
 		p.lightAt[i][0] = l.x, p.lightAt[i][1] = l.y, p.lightAt[i][2] = l.z, p.lightAt[i][3] = l.reach;
 		p.lightColour[i][0] = l.r, p.lightColour[i][1] = l.g, p.lightColour[i][2] = l.b;
+		p.lightAim[i][0] = l.axis[0], p.lightAim[i][1] = l.axis[1], p.lightAim[i][2] = l.axis[2], p.lightAim[i][3] = l.cone;
 	}
 	float mid[3] = { 0, 0, 0 };
 	for (uint32_t i = 0; i < count; i++)

@@ -24,6 +24,9 @@ struct Light
 	float x, y, z;
 	float r, g, b;
 	float reach = 3000;		// where its light ends
+	// a spotlight: its axis (view space, unit, away from it) and the cosine of half its cone; cone 0: light all round
+	float axis[3] = { 0, 0, 0 };
+	float cone = 0;
 };
 
 struct Frame

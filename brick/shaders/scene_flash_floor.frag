@@ -22,5 +22,6 @@ void main()
 	float r = max(d, 1.0) / Metre;
 	float reach = params.lightAt[pass.index].w;
 	float window = max(1.0 - (d / reach) * (d / reach), 0.0);
-	color = vec4(c * params.lightColour[pass.index].rgb * nl * min(3.0, 1.0 / (r * r)) * window * window / (params.light.x + 0.5), 1.0);
+	float cone = spotCone(pass.index, l / max(d, 1.0));
+	color = vec4(c * params.lightColour[pass.index].rgb * nl * min(3.0, 1.0 / (r * r)) * window * window * cone / (params.light.x + 0.5), 1.0);
 }

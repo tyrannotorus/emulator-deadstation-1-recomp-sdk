@@ -18,7 +18,15 @@ layout(std140, set = 1, binding = 1) uniform Params
 	vec4 frameAt;		// xy: the frame's uv offset; zw: its smallest uv
 	vec4 floorPlane;	// the floor: dot(p, xyz) = w, xyz its unit normal, up
 	vec4 project;		// a view space point's place on the game's screen: ofx, ofy, h, the camera's vertical scale
+	vec4 lightAim[6];	// a spotlight's axis, w: the cosine of half its cone (0: light all round)
 } params;
+
+// How much of light i reaches along toLight (unit, toward it): 1 for light all round; a spotlight's cone, its edge soft
+float spotCone(int i, vec3 toLight)
+{
+	vec4 aim = params.lightAim[i];
+	return aim.w == 0.0 ? 1.0 : smoothstep(aim.w, mix(aim.w, 1.0, 0.25), dot(-toLight, aim.xyz));
+}
 
 vec3 sunSpace(vec3 p)
 {

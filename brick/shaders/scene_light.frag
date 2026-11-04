@@ -59,7 +59,7 @@ void main()
 		float r = max(d, 1.0) / Metre;
 		float window = 1.0 - (d / reach) * (d / reach);
 		float lit = i == 0 ? flashLit(vPos) : 1.0;
-		add += params.lightColour[i].rgb * nl * min(3.0, 1.0 / (r * r)) * window * window * lit;
+		add += params.lightColour[i].rgb * nl * min(3.0, 1.0 / (r * r)) * window * window * lit * spotCone(i, l / max(d, 1.0));
 	}
 	color = vec4(min(c * sunShade + c * add / had, vec3(1.0)), 1.0);
 }
