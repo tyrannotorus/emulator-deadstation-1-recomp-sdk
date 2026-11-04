@@ -1,0 +1,46 @@
+--- a/runtime/src/dma.c
++++ b/runtime/src/dma.c
+@@ -585,6 +585,13 @@
+     }
+ 
+     uint32_t words_budget = a->cycles_accum / cycles_per_word;
++#ifdef PSX_LEAN_TIMING
++    /* Local patch 0020 (lean timing): the MDEC's transfer moved whole at its first service (the decode as fast as the
++     * host does it), not paced at the PlayStation's 14 cycles a word over hundreds of device services: movies pace
++     * themselves by the vertical blank and the disc. */
++    words_budget = a->remaining_words;
++    a->cycles_accum = 0;
++#endif
+     if (words_budget == 0) return;
+ 
+     uint32_t addr = DMA_RAM_ADDR(channels[ch].madr);
+@@ -640,7 +647,9 @@
+ 
+     if (moved == 0) return;
+ 
++#ifndef PSX_LEAN_TIMING
+     a->cycles_accum -= moved * cycles_per_word;
++#endif
+     channels[ch].madr = addr;
+ 
+     if (a->remaining_words == 0) {
+@@ -710,6 +719,19 @@
+ 
+ static uint32_t gpu_ll_read_word(void *opaque, uint32_t address) {
+     (void)opaque;
++#ifdef PSX_LEAN_TIMING
++    /* Local patch 0020 (lean timing): a display-list word in main RAM read straight (no access hook watches a DMA's
++     * reads); the mods' aperture and the rest as before */
++    {
++        const uint32_t a = address & 0x1FFFFFFFu;
++        if (a < PSX_MAIN_RAM_WINDOW_BYTES) {
++            extern uint8_t *memory_get_ram_ptr(void);
++            uint32_t v;
++            memcpy(&v, memory_get_ram_ptr() + (a & g_psx_ram_mask & ~3u), 4);
++            return v;
++        }
++    }
++#endif
+     return psx_read_word(address);
+ }
+ 

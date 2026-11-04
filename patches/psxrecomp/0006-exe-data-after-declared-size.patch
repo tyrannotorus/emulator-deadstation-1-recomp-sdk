@@ -1,0 +1,15 @@
+diff --git a/recompiler/src/ps1_exe_parser.cpp b/recompiler/src/ps1_exe_parser.cpp
+index 91a18dd6..f0a46763 100644
+--- a/recompiler/src/ps1_exe_parser.cpp
++++ b/recompiler/src/ps1_exe_parser.cpp
+@@ -334,7 +334,9 @@ std::optional<PS1Executable> PS1ExeParser::parse_buffer(
+ 
+     // Check file size matches buffer
+     size_t expected_size = 2048 + exe.header.file_size;
+-    if (buffer.size() != expected_size) {
++    // Data after the declared size (a boot EXE may carry 66 KB of it) is what the BIOS's loader
++    // ignores too: only the header's file_size bytes are loaded. Shorter is still an error.
++    if (buffer.size() < expected_size) {
+         error_msg = fmt::format(
+             "File size mismatch: header specifies {} bytes total (2048 + {}), got {}",
+             expected_size, exe.header.file_size, buffer.size()

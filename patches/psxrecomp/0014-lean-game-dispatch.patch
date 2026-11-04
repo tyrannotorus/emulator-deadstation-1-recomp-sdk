@@ -1,0 +1,110 @@
+--- a/runtime/src/dirty_ram_interp.c
++++ b/runtime/src/dirty_ram_interp.c
+@@ -2478,6 +2478,64 @@
+  * PSX_RECURSION_LIMIT. One-shot. NOT a fix — the upstream bogus-pointer divergence
+  * still needs the oracle; this converts a hard crash into a catchable, diagnosed
+  * bail (Rule 15: make the failure observable). */
++#if defined(PSX_LEAN_TIMING) && defined(PSX_HAS_GAME_DISPATCH)
++/* Local patch 0014: a call into clean game text once the game has started, straight to its compiled function. The
++ * full dispatch would reach the same place (no BIOS hook or stub claims game text, the BIOS table holds no game
++ * address, and dirty_ram_dispatch's clean path calls psx_dispatch_game_compiled) after a trace, hooks, a table
++ * search and its own bookkeeping; this sets the same context around the call (interpreter-active, phase 3, mixed
++ * depth). 0: not taken (nothing done), the full dispatch follows. */
++int psx_lean_game_dispatch(CPUState* cpu, uint32_t addr) {
++    extern int fntrace_is_game_started(void);
++    extern uint32_t g_text_clean_epoch;
++    extern int g_text_last_ok_clean;
++    typedef void (*PsxGameEntryFn)(CPUState*);
++    extern PsxGameEntryFn psx_game_entry_lookup(uint32_t addr, uint32_t* resume_pc, const uint32_t** ranges,
++                                                uint32_t* range_count);
++    extern int dirty_ram_text_native_ok_ranges_from(const uint32_t* lo_len_pairs, uint32_t count, uint32_t exec_pc);
++    extern void psx_check_interrupts_dispatch_entry(CPUState* cpu, uint32_t resume_pc);
++    extern int psx_vsync_query_hle_try(CPUState* cpu, uint32_t addr);
++    /* a target found native-ok from clean pages: its function kept (patch 0021's lookup) until a page bit is set (the
++     * epoch, patch 0013), then called as psx_dispatch_game_compiled would (the same entry check, resume PC, VSync
++     * hook), without its search and range checks */
++    static struct { uint32_t addr, epoch, resume; PsxGameEntryFn fn; } s_fast[4096];
++    const uint32_t ci = (addr >> 2) & 4095u;
++    if (addr == 0x80000048u || !fntrace_is_game_started()) return 0;
++    PsxGameEntryFn fn = 0;
++    uint32_t resume = 0;
++    if (s_fast[ci].addr == addr && s_fast[ci].epoch == g_text_clean_epoch && s_fast[ci].fn) {
++        fn = s_fast[ci].fn;
++        resume = s_fast[ci].resume;
++    } else {
++        const uint32_t* ranges = 0;
++        uint32_t count = 0;
++        PsxGameEntryFn found = psx_game_entry_lookup(addr, &resume, &ranges, &count);
++        if (!found) return 0;
++        g_text_last_ok_clean = 0;
++        if (!dirty_ram_text_native_ok_ranges_from(ranges, count, addr)) return 0;
++        if (g_text_last_ok_clean) {
++            s_fast[ci].addr = addr, s_fast[ci].epoch = g_text_clean_epoch;
++            s_fast[ci].resume = resume, s_fast[ci].fn = found;
++        }
++        fn = found;
++    }
++    int prev = g_dirty_interp_active;
++    g_dirty_interp_active = 1;
++    int prev_phase = g_exec_phase;
++    g_exec_phase = 3;
++    g_mixed_depth++;
++    ls_func_enter(addr, cpu);
++    psx_check_interrupts_dispatch_entry(cpu, addr);
++    cpu->pc = resume;
++    if (!psx_vsync_query_hle_try(cpu, addr))
++        fn(cpu);
++    ls_func_exit(addr, cpu, 1);
++    g_mixed_depth--;
++    g_exec_phase = prev_phase;
++    g_dirty_interp_active = prev;
++    return 1;
++}
++#endif
++
+ int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
+     extern int g_psx_dispatch_depth;
+     extern void psx_fatal_halt(const char *reason);
+--- a/generated/OpenBIOS_dispatch.c
++++ b/generated/OpenBIOS_dispatch.c
+@@ -9090,6 +9090,13 @@
+         cpu->pc = 0;
+         int lo = 0, hi = 3990 - 1;
+         int found = 0;
++#if defined(PSX_LEAN_TIMING) && defined(PSX_HAS_GAME_DISPATCH)
++        /* local patch 0014: clean game text, once the game has started, straight to its compiled function */
++        {
++            extern int psx_lean_game_dispatch(CPUState* cpu, uint32_t addr);
++            if (psx_lean_game_dispatch(cpu, addr)) found = 1;
++        }
++#endif
+         /* BIOS HLE tier: consult the hook FIRST, on the pre-normalize
+          * physical address. It must see (a) the A0/B0/C0 service vectors
+          * (game thunks jr there with the function number in $t1) and (b)
+@@ -9098,7 +9105,7 @@
+          * backends. Handled (rc 1) ⇒ the service completed against guest
+          * state and the guest resumes at $ra via the trampoline's normal
+          * return/tail contract below. rc 0 ⇒ pure LLE fall-through. */
+-        if (g_psx_bios_hle_hook &&
++        if (!found && g_psx_bios_hle_hook &&
+             g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)) {
+             cpu->pc = cpu->gpr[31];
+             found = 1;
+@@ -9130,7 +9137,7 @@
+          * (game not started) still falls through to normalize(). */
+         extern int fntrace_is_game_started(void);
+         extern int dirty_ram_text_native_ok(uint32_t phys);
+-        int game_shell_overlap = fntrace_is_game_started() &&
++        int game_shell_overlap = !found && fntrace_is_game_started() &&
+             game_phys >= 0x00030000u && game_phys <= 0x00043D43u;
+         /* Shell-window addresses the loaded game EXE image covers with
+          * matching bytes are GAME code, not the BIOS shell — route them to
+@@ -9142,7 +9149,7 @@
+          * The native-ok compare is ground truth: pre-game the RAM holds shell
+          * bytes (differ from the game image -> not routed here -> shell
+          * dispatches); post-load it holds the game EXE (matches -> game path). */
+-        int game_text_in_shell_window =
++        int game_text_in_shell_window = !found &&
+             game_phys >= 0x00030000u && game_phys <= 0x00043D43u &&
+             psx_game_address_in_text(addr) && dirty_ram_text_native_ok(game_phys);
+         if (!found && (game_shell_overlap || game_text_in_shell_window ||

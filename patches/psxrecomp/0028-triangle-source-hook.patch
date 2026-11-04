@@ -1,0 +1,11 @@
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -78,6 +78,8 @@
+ static int      gp0_words_needed;
+ static uint32_t gp0_next_source_addr = 0xFFFFFFFFu;
+ static uint32_t gp0_cmd_source_addr  = 0xFFFFFFFFu;
++/* Local patch 0028: the packet being drawn's address, for a module tagging polygons by what drew them */
++uint32_t psx_gpu_source_addr(void) { return gp0_cmd_source_addr; }
+ static uint16_t gp0_ot_rank = 0xFFFFu;
+ 
+ /* ---- Widescreen proportion correction --------------------------------------

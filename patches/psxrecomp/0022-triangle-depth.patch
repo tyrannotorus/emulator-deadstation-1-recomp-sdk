@@ -1,0 +1,65 @@
+--- a/runtime/include/gpu_render.h
++++ b/runtime/include/gpu_render.h
+@@ -60,6 +60,8 @@
+  * perspective_texturing). q[i] is the normalized 1/z homogeneous weight at
+  * vertex i. enabled == 0 restores the PS1's affine UV interpolation. */
+ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2);
++/* Local patch 0022: the next triangle's depth (see GpuRenderBackend.set_triangle_depth) */
++void gr_set_triangle_depth(int enabled, float z0, float z1, float z2);
+ 
+ /* Primitives */
+ void gr_fill_rect(int x, int y, int w, int h, uint16_t color);
+@@ -210,6 +212,9 @@
+      * pixel count, writes width/height to ow/oh. NULL if unsupported. */
+     int  (*wide_dump_full)(uint32_t *out, int cap_pixels, int *ow, int *oh,
+                            int base_x);
++    /* Local patch 0022 (optional, NULL = unsupported): the next triangle's per-vertex depth, the GTE's SZ of the
++     * projection that made each corner (0: none, a 2D primitive), for a backend that draws with a depth buffer. */
++    void (*set_triangle_depth)(int enabled, float z0, float z1, float z2);
+ } GpuRenderBackend;
+ 
+ #ifdef __cplusplus
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -3961,10 +3961,12 @@
+     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
+     if (!gte_geometry_correction_enabled()) {
+         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
++        gr_set_triangle_depth(0, 0.0f, 0.0f, 0.0f);   /* local patch 0022 */
+         return;
+     }
+     const int idx[3] = { i0, i1, i2 };
+     int32_t fx[3], fy[3];
++    uint16_t depth[3] = { 0, 0, 0 };   /* local patch 0022: each corner's projection depth (SZ), 0: none */
+     int any_precise = 0;
+     for (int i = 0; i < 3; i++) {
+         uint32_t word = gp0_cmd_buf[idx[i]];
+@@ -3975,12 +3977,14 @@
+                             : gp0_cmd_source_addr + (uint32_t)idx[i] * 4u;
+         int32_t px, py;
+         uint16_t sz;
++        sz = 0;
+         if (pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
+                                     &px, &py, &sz) != PGXP_SRC_NATIVE)
+-            any_precise = 1;
++            any_precise = 1, depth[i] = sz;
+         fx[i] = (int32_t)((int64_t)px + (int64_t)(vx[i] - raw_x) * 65536);
+         fy[i] = (int32_t)((int64_t)py + (int64_t)(vy[i] - raw_y) * 65536);
+     }
++    gr_set_triangle_depth(depth[0] && depth[1] && depth[2], (float)depth[0], (float)depth[1], (float)depth[2]);
+     if (!any_precise) {
+         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
+         return;
+--- a/runtime/src/gpu_render.c
++++ b/runtime/src/gpu_render.c
+@@ -113,6 +113,10 @@
+     if (g_b->set_perspective_triangle)
+         g_b->set_perspective_triangle(enabled, q0, q1, q2);
+ }
++void gr_set_triangle_depth(int enabled, float z0, float z1, float z2) {   /* local patch 0022 */
++    if (g_b->set_triangle_depth)
++        g_b->set_triangle_depth(enabled, z0, z1, z2);
++}
+ void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); }
+ void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) { g_b->copy_rect(sx, sy, dx, dy, w, h); }
+ void gr_draw_flat_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {

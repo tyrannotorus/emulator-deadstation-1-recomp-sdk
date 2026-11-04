@@ -1,0 +1,30 @@
+--- a/runtime/include/psx_cycles.h
++++ b/runtime/include/psx_cycles.h
+@@ -79,6 +79,9 @@
+  * on the HARD_CAP / event cadence, ≥ every 16K guest cycles) — not on every
+  * per-instruction charge. MotK VLC issues millions of advances/s; two add+
+  * branch pairs there were pure host tax. */
++/* Local patch 0030: guest time per instruction, in 256ths (256: as charged): less, and the guest CPU is that much faster against
++ * its vertical blanks and devices, a console overclocked. A module's plugin sets it for what asks more of the CPU than the PlayStation had. */
++extern uint32_t psx_cycle_rate;
+ static inline void psx_advance_cycles(uint32_t cycles) {
+ #if !defined(PSX_COSIM)
+     if (g_psx_cyc_batch) {
+@@ -97,6 +100,7 @@
+         }
+     }
+ #endif
++    if (psx_cycle_rate != 256u) cycles = (uint32_t)(((uint64_t)cycles * psx_cycle_rate) >> 8);
+     if (cycles == 0u) return;
+ #if defined(PSX_COSIM)
+     psx_advance_cycles_slow(cycles);
+--- a/runtime/src/psx_cycles.c
++++ b/runtime/src/psx_cycles.c
+@@ -134,6 +134,7 @@
+ static uint64_t s_devices_synced_cycle = 0;  /* devices are advanced up to here */
+ /* Exported for the inlined psx_advance_cycles / psx_cyc_charge hot path. */
+ uint64_t psx_next_service_cycle = 0;         /* absolute; 0 = dirty, recompute  */
++uint32_t psx_cycle_rate = 256u;	/* Local patch 0030 */
+ int      psx_in_device_service  = 0;         /* re-entrancy guard               */
+ int      g_plp_cycle_diag       = 0;
+ uint64_t g_plp_adv_calls        = 0;

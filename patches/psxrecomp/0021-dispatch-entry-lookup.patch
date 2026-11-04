@@ -1,0 +1,28 @@
+--- a/recompiler/src/game_dispatch_emitter.cpp
++++ b/recompiler/src/game_dispatch_emitter.cpp
+@@ -316,6 +316,25 @@
+     // Same precise address set as dispatch, without executing the entry. The
+     // runtime also asks it for the other segments' aliases of a missed PC to
+     // tell a segment miss from an interior one.
++    // Local patch 0021 (Deadstation's lean dispatch): the entry itself for a caller that caches it, and the code
++    // ranges' pages for the runtime's store path (pages without compiled code need no text guard).
++    ds << "\n/* Local patch 0021: an address's compiled function, its resume PC and code ranges (NULL: none). */\n";
++    ds << "typedef void (*PsxGameEntryFn)(CPUState*);\n";
++    ds << "PsxGameEntryFn psx_game_entry_lookup(uint32_t addr, uint32_t* resume_pc, const uint32_t** ranges,\n";
++    ds << "                                     uint32_t* range_count) {\n";
++    ds << "    const PsxGameDispatchEntry* entry = psx_game_find_entry(addr);\n";
++    ds << "    if (!entry || entry->range_count == 0) return 0;\n";
++    ds << "    *resume_pc = " << (cps ? "entry->resume_pc" : "addr") << ";\n";
++    ds << "    *ranges = &k_psx_game_code_ranges[entry->range_index].lo;\n";
++    ds << "    *range_count = entry->range_count;\n";
++    ds << "    return entry->fn;\n";
++    ds << "}\n";
++    ds << "/* Local patch 0021: every code range (lo, len) of the compiled game, to a callback. */\n";
++    ds << "void psx_game_each_code_range(void (*fn)(uint32_t lo, uint32_t len)) {\n";
++    ds << "    for (size_t i = 0; i < sizeof(k_psx_game_code_ranges) / sizeof(k_psx_game_code_ranges[0]); i++)\n";
++    ds << "        fn(k_psx_game_code_ranges[i].lo, k_psx_game_code_ranges[i].len);\n";
++    ds << "}\n";
++
+     ds << "\n/* 1 iff addr is a re-enterable compiled entry/continuation (no exec). */\n";
+     ds << "int psx_game_is_function_entry(uint32_t addr) {\n";
+     ds << "    return psx_game_find_entry(addr) != 0;\n";

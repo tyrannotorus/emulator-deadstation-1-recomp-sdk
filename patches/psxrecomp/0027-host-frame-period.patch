@@ -1,0 +1,25 @@
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -3254,12 +3254,21 @@
+     return psx_video_timing_is_pal() ? 50.0 : 1000.0 / PSX_FRAME_PERIOD_MS;
+ }
+ 
++/* Local patch 0027: a host whose presenter paces the frames (Deadstation's panel page flips) gives the pacer this period, its
++ * panel's own, so no frame is repeated. Called once at start-up. */
++static double g_host_frame_period_ms = 0.0;
++extern "C" void psx_host_set_frame_period_ms(double period_ms) {
++    g_host_frame_period_ms = period_ms;
++    g_guest_frame_period_ms = period_ms;
++    g_frame_period_ms = period_ms;
++}
++
+ static void sync_guest_cadence_to_video_standard(void) {
+     const uint32_t gen = psx_video_timing_generation();
+     if (gen == g_video_timing_generation_seen)
+         return;
+     g_video_timing_generation_seen = gen;
+-    if (g_mod_native_vblank_rate)
++    if (g_mod_native_vblank_rate || g_host_frame_period_ms > 0.0)
+         return;
+     const double period_ms = psx_video_timing_is_pal()
+         ? 1000.0 / 50.0

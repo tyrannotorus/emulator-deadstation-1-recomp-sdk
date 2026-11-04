@@ -1,0 +1,24 @@
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -1304,6 +1304,8 @@
+ static uint32_t      g_savestate_input_guard_min_until = 0;
+ static uint32_t      g_savestate_input_guard_max_until = 0;
+ static int           g_headless       = 0;   /* debug/CI frontend: no SDL window/audio */
++/* Optional, weak: a host's own present (see the software present path). */
++extern "C" int psx_host_present(const uint32_t *pixels, int width, int height) __attribute__((weak));
+ 
+ /* FMV instant-skip via the game's OWN end-of-movie path. Tomba's MDEC player
+  * (FUN_8001efe8) tears a movie down when the streamed frame number reaches that
+@@ -7911,6 +7913,12 @@
+     int src_h = (int)present_h * active_scale;
+     if (local_viewport_crop_applied && src_w >= 2)
+         src_w /= 2;
++    /* A host that shows the frames itself (Deadstation on the Brick: its Vulkan presenter on fb0, SDL's
++     * video being the dummy driver there) takes the active display rect here, ARGB8888 rows. */
++    if (psx_host_present && psx_host_present(sdl_pixel_buf, src_w, src_h)) {
++        netplay_note_present();
++        return ep;
++    }
+     if (g_gl_active) {
+         /* OpenGL present: upload the active display rect and draw a full-screen
+          * quad. Either SwapWindow vsync OR the wall-clock pacer owns timing,

@@ -1,0 +1,25 @@
+--- a/runtime/src/gpu_vk_renderer.c
++++ b/runtime/src/gpu_vk_renderer.c
+@@ -32,7 +32,10 @@
+ #include <stdlib.h>
+ #include <math.h>
+ 
+-#if !defined(PSX_HAVE_VULKAN)
++#if defined(PSX_HOST_VK_RENDERER)
++/* Local patch 0012: the host (Deadstation on the Brick: recomp/brick/psx_gpu.cpp) supplies the Vulkan backend and
++ * these entry points, on its own presenter's device. */
++#elif !defined(PSX_HAVE_VULKAN)
+ /* Vulkan SDK headers/glslc were not found at configure time: compile an inert
+  * backend so the runtime still builds and simply falls back to software. */
+ int  vk_renderer_init_context(struct SDL_Window *win) { (void)win; return 0; }
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -15718,7 +15718,7 @@
+         std::fflush(stdout);
+     }
+     memory_init(bios_path_str.c_str());
+-#ifndef PSX_HAVE_VULKAN
++#if !defined(PSX_HAVE_VULKAN) && !defined(PSX_HOST_VK_RENDERER)  /* local patch 0012: the host's Vulkan */
+     /* Vulkan was not compiled in (PSX_ENABLE_VULKAN=OFF or no SDK found).
+      * Refuse a vulkan request from ANY source (config / CLI / launcher seed)
+      * and fall back to OpenGL, so the window is never created with

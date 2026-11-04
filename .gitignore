@@ -1,0 +1,19 @@
+build-brick/
+__pycache__/
+# discs and anything made from them
+*.chd
+*.cue
+*.bin
+*.iso
+*.img
+*.pbp
+*.ecm
+*.ccd
+*.sub
+*.m3u
+generated/
+overlays/
+decomp/
+extracted/
+disc/
+saves/

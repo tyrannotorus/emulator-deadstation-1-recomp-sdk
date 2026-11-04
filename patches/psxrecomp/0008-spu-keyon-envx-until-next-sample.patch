@@ -1,0 +1,49 @@
+diff --git a/runtime/src/spu.c b/runtime/src/spu.c
+index 0e3c0340..0119bacc 100644
+--- a/runtime/src/spu.c
++++ b/runtime/src/spu.c
+@@ -909,10 +909,22 @@ static int16_t voice_next_sample(int idx) {
+     return (int16_t)shaped;
+ }
+ 
++/* KEYON takes effect at the SPU's next sample tick (every 768 CPU cycles), not on the register write:
++ * until then ENVX still reads the voice's old level (Beetle: VoiceOn is serviced in the per-sample loop).
++ * libspu's SpuGetKeyStatus reads ENVX right after SpuSetKey(SPU_ON). A game's sound start may key a
++ * voice on, then every 3 VSyncs keys it on again until SpuGetKeyStatus returns SPU_ON (keyed, level not
++ * 0): with the level zeroed on the write itself it read 0 every time and hung on its attract screen.
++ * Audio is unchanged (the voice still starts on the write); only the ENVX read keeps the old level for up
++ * to one sample period. Not saved in states (it lasts at most 768 cycles). */
++static uint16_t kon_envx_old[SPU_VOICE_COUNT];
++static uint64_t kon_envx_until[SPU_VOICE_COUNT];
++
+ static void key_on(uint32_t mask) {
+     for (int i = 0; i < SPU_VOICE_COUNT; i++) {
+         if (!(mask & (1u << i))) continue;
+         SpuVoice *v = &voices[i];
++        kon_envx_old[i] = v->env_level;
++        kon_envx_until[i] = psx_cycle_count + 768u;
+         memset(v, 0, sizeof(*v));
+         v->active = 1;
+         /* Address registers count 8-byte units but hardware ignores bit0
+@@ -952,6 +964,8 @@ void spu_init(void) {
+     memset(spu_regs, 0, sizeof(spu_regs));
+     memset(voices, 0, sizeof(voices));
+     memset(s_events, 0, sizeof(s_events));
++    memset(kon_envx_old, 0, sizeof(kon_envx_old));
++    memset(kon_envx_until, 0, sizeof(kon_envx_until));
+     transfer_addr = 0;
+     key_on_count = 0;
+     render_frames = 0;
+@@ -1405,8 +1419,11 @@ uint32_t spu_read(uint32_t addr) {
+             if (addr >= 0x1F801C00u && addr < 0x1F801D80u
+                 && (idx & 7u) == 6u) {
+                 int v = (int)(idx >> 3);
+-                if (v >= 0 && v < SPU_VOICE_COUNT)
++                if (v >= 0 && v < SPU_VOICE_COUNT) {
++                    if (psx_cycle_count < kon_envx_until[v])
++                        return kon_envx_old[v];   /* KEYON not serviced yet (see key_on) */
+                     return voices[v].env_level;
++                }
+             }
+             return spu_regs[idx];
+         }

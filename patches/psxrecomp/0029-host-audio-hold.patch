@@ -1,0 +1,55 @@
+--- a/runtime/include/psx_sdl_audio.h
++++ b/runtime/include/psx_sdl_audio.h
+@@ -21,6 +21,8 @@
+ SDL_AudioDeviceID psx_sdl_audio_open(
+     const PsxSdlAudioSpec *want, PsxSdlAudioSpec *have);
+ int psx_sdl_audio_resume(SDL_AudioDeviceID device);
++/* Local patch 0029: the device paused, or going on (what it has queued kept). */
++void psx_sdl_audio_hold(SDL_AudioDeviceID device, int held);
+ void psx_sdl_audio_close(SDL_AudioDeviceID device);
+ void psx_sdl_audio_clear(SDL_AudioDeviceID device);
+ Uint32 psx_sdl_audio_queued_size(SDL_AudioDeviceID device);
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -3493,6 +3493,13 @@
+     debug_server_shutdown();
+ }
+ 
++/* Local patch 0029: the host's menu holds the guest on its own thread, the SPU rendering nothing: the device paused
++ * until it goes on, with what the bridge has queued kept, rather than running dry into counted underruns. */
++extern "C" void psx_host_audio_hold(int held) {
++    if (sdl_audio_device)
++        psx_sdl_audio_hold(sdl_audio_device, held);
++}
++
+ /* Tear down the game window/GL/audio after a lobby soft-return. Leaves SDL
+  * subsystems and the lobby WebSocket intact for the next launcher session. */
+ static void teardown_game_session_keep_lobby(void) {
+--- a/runtime/src/psx_sdl_audio.cpp
++++ b/runtime/src/psx_sdl_audio.cpp
+@@ -67,6 +67,13 @@
+                : -1;
+ }
+ 
++extern "C" void psx_sdl_audio_hold(SDL_AudioDeviceID, int held)
++{
++    if (!s_audio_stream) return;
++    if (held) (void)SDL_PauseAudioStreamDevice(s_audio_stream);
++    else (void)SDL_ResumeAudioStreamDevice(s_audio_stream);
++}
++
+ extern "C" void psx_sdl_audio_close(SDL_AudioDeviceID)
+ {
+     if (s_audio_stream) SDL_DestroyAudioStream(s_audio_stream);
+@@ -140,6 +147,11 @@
+     return 0;
+ }
+ 
++extern "C" void psx_sdl_audio_hold(SDL_AudioDeviceID device, int held)
++{
++    SDL_PauseAudioDevice(device, held);
++}
++
+ extern "C" void psx_sdl_audio_close(SDL_AudioDeviceID device)
+ {
+     SDL_CloseAudioDevice(device);

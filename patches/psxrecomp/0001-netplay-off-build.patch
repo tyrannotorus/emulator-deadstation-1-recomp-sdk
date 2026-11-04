@@ -1,0 +1,63 @@
+diff --git a/recompiler/tests/test_optional_netplay_auth.py b/recompiler/tests/test_optional_netplay_auth.py
+index b1073c88..16ff877f 100644
+--- a/recompiler/tests/test_optional_netplay_auth.py
++++ b/recompiler/tests/test_optional_netplay_auth.py
+@@ -30,6 +30,7 @@ def main():
+                 (root / "recomp_net").mkdir()
+                 (root / "recomp_net/auth.h").write_text("RNET_AUTH_HEADER_INCLUDED\n")
+                 (root / "recomp_net/chat_filter.h").write_text("RNET_CHAT_HEADER_INCLUDED\n")
++                (root / "recomp_net/host_relay.h").write_text("RNET_HOST_RELAY_HEADER_INCLUDED\n")
+             flags = ["RECOMP_LAUNCHER=1", "RECOMP_LAUNCHER_HAS_ACCOUNT=1",
+                      "SDL_VERSION_ATLEAST(x,y,z)=1", "DEFAULT_DEBUG_PORT=4370"]
+             if enabled:
+@@ -45,11 +46,13 @@ def main():
+             assert p.returncode == 0, p.stderr
+             if enabled:
+                 for token in ("RNET_AUTH_HEADER_INCLUDED", "rnet_account_pump()",
+-                              "ae_np_account_login_begin", "account_available = ae_np_account_available"):
++                              "ae_np_account_login_begin", "account_available = ae_np_account_available",
++                              "RNET_HOST_RELAY_HEADER_INCLUDED", "RNetHostRelayStatus st"):
+                     assert token in p.stdout, f"enabled path lost {token}"
+             else:
+                 assert "rnet_account_" not in p.stdout, "offline launcher retained account linkage"
+                 assert "RNET_ACCOUNT_" not in p.stdout, "offline launcher retained account state dependency"
++                assert "RNetHostRelayStatus st" not in p.stdout, "offline launcher retained the recomp-net host relay"
+         # Compile the REAL offline lobby TU too: its early chat-report include
+         # used to leak an independent optional dependency before the #else.
+         lobby = args.source.parent / "psx_lobby_client.c"
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index ca7eee06..1fdcc0cf 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -63,12 +63,12 @@ extern "C" void psx_event_step_conservative_env_init(void);
+ #include "psx_netplay_rb.h"
+ #include "psx_selfcheck.h"
+ #include "psx_lobby_client.h"
+-#include "recomp_net/host_relay.h" /* RNetHostRelayStatus for the launcher relay line */
+ #include "netplay_bios_settle.h"
+ #include "netplay_exit_reason.h"
+ #include "host_time.h"
+ #if defined(PSX_HAS_RECOMP_NET)
+ #include "recomp_net/auth.h"
++#include "recomp_net/host_relay.h" /* RNetHostRelayStatus for the launcher relay line */
+ #include "recomp_net/chat_filter.h" /* chat profanity mask, LAN rooms too */
+ #endif
+ #include "spu.h"
+@@ -10964,6 +10964,7 @@ namespace {
+     int ae_np_relay_status(void*, char* out, size_t out_cap) {
+         if (!out || !out_cap) return 0;
+         out[0] = '\0';
++#if defined(PSX_HAS_RECOMP_NET)
+         if (g_lnch_hosting_lan || g_lnch_joined_lan || !psx_lobby_in_lobby()) return 0;
+         RNetHostRelayStatus st;
+         if (!psx_lobby_host_relay_status(&st)) return 0;
+@@ -11007,6 +11008,9 @@ namespace {
+             return 1;
+         }
+         return 0;
++#else
++        return 0; /* offline build: no lobby host relay */
++#endif
+     }
+     int ae_np_force_turn_set(void*, int force) {
+         if (g_lnch_hosting_lan || g_lnch_joined_lan)

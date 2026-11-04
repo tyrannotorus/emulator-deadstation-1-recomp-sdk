@@ -1,0 +1,21 @@
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -319,6 +319,9 @@
+ /* Store the configured speed for post-BIOS application. Boot stays at 1x. */
+ void cdrom_set_game_speed(int divisor) {
+     g_game_divisor = divisor;
++    /* Local patch 0025: from the start, the BIOS's own boot too (at 1x its load of the game's EXE took seconds);
++     * DEADSTATION_BIOS_DISC_1X keeps boot at 1x. */
++    if (!getenv("DEADSTATION_BIOS_DISC_1X")) g_disc_speed_divisor = divisor;
+ }
+ 
+ /* Called by fntrace_record on first game-range dispatch. */
+@@ -2805,7 +2808,7 @@
+     memset(last_sector_buffer, 0, sizeof(last_sector_buffer));
+ 
+     /* Rematch re-calls cdrom_init; boot must see 1x until game entry again. */
+-    g_disc_speed_divisor = 1;
++    g_disc_speed_divisor = getenv("DEADSTATION_BIOS_DISC_1X") ? 1 : g_game_divisor;   /* local patch 0025 */
+ 
+     index_reg = 0;
+     request_reg = 0;

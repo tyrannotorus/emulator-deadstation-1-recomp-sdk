@@ -1,0 +1,101 @@
+--- a/runtime/src/debug_server.c
++++ b/runtime/src/debug_server.c
+@@ -2039,15 +2039,35 @@
+ #endif
+ }
+ 
++/* fn_hold (local patch 0005): park the emu thread at the nth entry of a function, still
++ * serving commands, so a client can read the state between two stages of a frame. Declared
++ * in Release too: the fn_hold command's handler is always built. */
++static volatile uint32_t s_hold_fn = 0;
++static volatile int s_hold_fn_left = 0;
++static volatile int s_fn_held = 0;
++
+ #ifdef PSX_NO_DEBUG_TOOLS
+ /* Release: inlined in cpu_state.h for every generated TU. */
+ #else
++
++static void fn_hold_check(uint32_t func_addr)
++{
++    if (s_hold_fn == 0 || func_addr != s_hold_fn || --s_hold_fn_left > 0) return;
++    s_hold_fn = 0;
++    s_fn_held = 1;
++    while (s_fn_held) {
++        debug_server_poll();
++        SDL_Delay(1);
++    }
++}
++
+ void debug_server_log_call_entry(uint32_t func_addr) {
+     /* Whole-call native replay is diagnostic and must not double-consume or
+      * overwrite live trace/stack-watch state. Architectural CPU state is
+      * compared by the caller; these observers are intentionally inert. */
+     { extern int g_ls_replay_active; if (g_ls_replay_active) return; }
+     g_psx_last_fn_entry = func_addr;
++    fn_hold_check(func_addr);
+ #ifdef PSX_STACK_GUARD
+     g_psx_recent_fn[g_psx_recent_fn_i++ & (PSX_RECENT_FN_CAP - 1u)] = func_addr;
+     psx_native_stack_guard(func_addr);   /* runs in debug AND release (before the early-return) */
+@@ -14085,6 +14105,9 @@
+     send_fmt("{\"id\":%d,\"ok\":true,%s}\n", id, body);
+ }
+ 
++static void handle_frame_hold(int id, const char *json);
++static void handle_fn_hold(int id, const char *json);
++
+ static const CmdEntry s_commands[] = {
+     { "phase_profile",     handle_phase_profile },
+     { "starv_ring",        handle_starv_ring },
+@@ -14319,6 +14342,8 @@
+     { "frame_timeseries",  handle_frame_timeseries },
+     { "first_failure",     handle_first_failure },
+     { "read_frame_ram",    handle_read_frame_ram },
++    { "frame_hold",        handle_frame_hold },
++    { "fn_hold",           handle_fn_hold },
+     { "set_snapshot",      handle_set_snapshot },
+     { "get_snapshots",     handle_get_snapshots },
+     { "screenshot",        handle_present_screenshot },
+@@ -15187,12 +15212,39 @@
+     }
+ }
+ 
++/* frame_hold (local patch 0005): park the emu thread at the vblank where the frame
++ * counter reaches s_hold_frame, still serving commands, so a client can read a frame's
++ * exact state; moving the hold frame forward releases it. 0 = off. */
++static volatile uint64_t s_hold_frame = 0;
++
+ void debug_server_wait_if_paused(void)
+ {
+-    /* No-op: pause/step removed (see handle_pause). Kept exported so
+-     * main.cpp's vblank callback continues to compile without
+-     * conditional defines. s_paused is now permanently zero, so the
+-     * old `while (s_paused)` loop would have been a no-op anyway. */
++    while (s_hold_frame != 0 && s_frame_count >= s_hold_frame) {
++        debug_server_poll();
++        SDL_Delay(1);
++    }
++}
++
++static void handle_fn_hold(int id, const char *json)
++{
++    char addr_str[32];
++    if (json_get_int(json, "release", 0)) s_fn_held = 0;
++    if (json_get_str(json, "addr", addr_str, sizeof(addr_str))) {
++        int nth = json_get_int(json, "nth", 1);
++        s_hold_fn_left = nth < 1 ? 1 : nth;
++        s_hold_fn = hex_to_u32(addr_str);
++    }
++    send_fmt("{\"id\":%d,\"ok\":true,\"armed\":\"0x%08X\",\"held\":%d,\"frame\":%llu}",
++             id, s_hold_fn, s_fn_held, (unsigned long long)s_frame_count);
++}
++
++static void handle_frame_hold(int id, const char *json)
++{
++    int frame = json_get_int(json, "frame", -1);
++    if (frame >= 0) s_hold_frame = (uint64_t)frame;
++    send_fmt("{\"id\":%d,\"ok\":true,\"hold_frame\":%llu,\"cur_frame\":%llu,\"held\":%d}",
++             id, (unsigned long long)s_hold_frame, (unsigned long long)s_frame_count,
++             (s_hold_frame != 0 && s_frame_count >= s_hold_frame) ? 1 : 0);
+ }
+ 
+ void debug_server_check_watchpoints(void)

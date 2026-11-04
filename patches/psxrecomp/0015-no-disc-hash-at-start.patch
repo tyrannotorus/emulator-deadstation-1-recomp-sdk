@@ -1,0 +1,17 @@
+--- a/runtime/src/mod_runtime.cpp
++++ b/runtime/src/mod_runtime.cpp
+@@ -1231,7 +1231,14 @@
+     if (disc_path != s.disc_path) {
+         std::string hash_error;
+         std::string digest;
++#ifdef PSX_LEAN_TIMING
++        /* Local patch 0015: no SHA-256 of the whole disc (a CHD's every sector decompressed and its ECC rebuilt: ~40 s
++         * on the Brick). The host (Deadstation) checked the disc before starting the module, and its mods target the
++         * game id, not a disc digest. */
++        (void)hash_error;
++#else
+         if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
++#endif
+         s.disc_path = disc_path;
+         s.disc_sha256 = std::move(digest);
+     }

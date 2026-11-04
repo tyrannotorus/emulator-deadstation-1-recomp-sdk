@@ -1,0 +1,34 @@
+diff --git a/tools/new_project_layout/probe_disc.py b/tools/new_project_layout/probe_disc.py
+index 5526fb23..ca8fa49a 100755
+--- a/tools/new_project_layout/probe_disc.py
++++ b/tools/new_project_layout/probe_disc.py
+@@ -312,6 +312,15 @@ def parse_system_cnf(cnf: bytes) -> str:
+     return token
+ 
+ 
++def parse_system_cnf_dirs(cnf: bytes) -> list[str]:
++    """Directories on the BOOT= path, e.g. ['GAME'] for cdrom:\\GAME\\SLUS_000.00;1."""
++    text = cnf.decode("ascii", "replace")
++    m = re.search(r"BOOT\s*=\s*cdrom:\\?([^;\s]+)", text, re.I)
++    if not m:
++        return []
++    return [part for part in re.split(r"[\\/]", m.group(1).strip())[:-1] if part]
++
++
+ def normalize_serial(boot_exe: str) -> tuple[str, str]:
+     """Return (game_id SLUS-00562, exe_name SLUS_005.62)."""
+     raw = boot_exe.strip()
+@@ -430,6 +439,13 @@ def probe(cue_path: Path, *, identity_only: bool = False) -> DiscProbe:
+         extent, fsize = entries["SYSTEM.CNF"]
+         cnf = read_file(read_user, data, extent, fsize)
+         boot_token = parse_system_cnf(cnf)
++        # The boot EXE may sit in a subdirectory (cdrom:\\GAME\\SLUS_000.00).
++        for d in parse_system_cnf_dirs(cnf):
++            upper = {k.upper(): k for k in entries}
++            if d.upper() not in upper:
++                raise SystemExit(f"SYSTEM.CNF boot directory {d!r} not on disc")
++            dext, dsize = entries[upper[d.upper()]]
++            entries = parse_root_entries(read_file(read_user, data, dext, dsize))
+     serial, boot_exe = normalize_serial(boot_token)
+ 
+     disc_boot = boot_token

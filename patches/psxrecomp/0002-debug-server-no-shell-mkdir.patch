@@ -1,0 +1,63 @@
+diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
+index d923cb54..c812b6be 100644
+--- a/runtime/src/debug_server.c
++++ b/runtime/src/debug_server.c
+@@ -69,6 +69,7 @@
+ #  define WIN32_LEAN_AND_MEAN
+ #  include <winsock2.h>
+ #  include <ws2tcpip.h>
++#  include <direct.h>       /* _mkdir — overlay_dump output directory */
+ #  if defined(__x86_64__) || defined(_M_X64)
+ #    include <intrin.h>     /* __readgsqword — native stack-overflow guard */
+ #    define PSX_STACK_GUARD 1
+@@ -85,6 +86,7 @@
+ #  include <fcntl.h>
+ #  include <errno.h>
+ #  include <pthread.h>      /* phase_profile sampler thread */
++#  include <sys/stat.h>     /* mkdir — overlay_dump output directory */
+    typedef int sock_t;
+ #  define SOCK_INVALID (-1)
+ #  define sock_close close
+@@ -13182,6 +13184,26 @@ static void handle_overlay_cps_probe(int id, const char *json)
+              id, pc, cnt, found, ci, nrange, ncand, matched, outcome);
+ }
+ 
++/* mkdir -p without a shell: create each '/'- or '\\'-separated prefix of `path`. */
++static void overlay_dump_mkdirs(const char *path)
++{
++    char buf[512];
++    size_t n = strlen(path);
++    if (n == 0 || n >= sizeof(buf)) return;
++    memcpy(buf, path, n + 1);
++    for (size_t i = 1; i <= n; ++i) {
++        if (buf[i] != '/' && buf[i] != '\\' && buf[i] != '\0') continue;
++        char c = buf[i];
++        buf[i] = '\0';
++#ifdef _WIN32
++        _mkdir(buf);
++#else
++        mkdir(buf, 0755);
++#endif
++        buf[i] = c;
++    }
++}
++
+ /* overlay_dump: extract RAM regions that dirty_ram has marked executable
+  * above a threshold physical address. Writes <crc32>.bin files to a
+  * caller-supplied directory and returns a JSON manifest.
+@@ -13208,12 +13230,9 @@ static void handle_overlay_dump(int id, const char *json)
+     uint32_t lo_phys = lo_buf[0] ? (uint32_t)strtoul(lo_buf, NULL, 0) : 0x00098000u;
+     if (!dir_buf[0]) strncpy(dir_buf, "overlays", sizeof(dir_buf) - 1);
+ 
+-    /* Create output directory (best-effort). */
+-#ifdef _WIN32
+-    { char cmd[600]; snprintf(cmd, sizeof(cmd), "mkdir \"%s\" 2>nul", dir_buf); system(cmd); }
+-#else
+-    { char cmd[600]; snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", dir_buf); system(cmd); }
+-#endif
++    /* Create output directory (best-effort), one component at a time. The path comes
++     * from the request JSON, so it is never handed to a shell. */
++    overlay_dump_mkdirs(dir_buf);
+ 
+     uint8_t *ram      = memory_get_ram_ptr();
+     uint32_t bw       = dirty_ram_get_bitmap_word_count();

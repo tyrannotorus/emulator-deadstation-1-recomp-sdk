@@ -1,0 +1,163 @@
+--- a/runtime/include/fntrace.h
++++ b/runtime/include/fntrace.h
+@@ -32,7 +32,12 @@
+  * window retrospectives without per-second eviction.
+  * Definition uses PSX_BSS so the zeros stay out of the PE image (MinGW+LTO
+  * otherwise stuffed this into .rdata and bloated Windows .exe by ~144MiB). */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define FNTRACE_RING_CAP (1u << 10)
++#else
+ #define FNTRACE_RING_CAP (1u << 22)
++#endif
+ 
+ typedef struct {
+     uint32_t frame;     /* s_frame_count at dispatch */
+--- a/runtime/include/sio.h
++++ b/runtime/include/sio.h
+@@ -199,7 +199,12 @@
+ 
+ /* ---- SIO byte-level trace ring buffer ----
+  * 1M entries × ~28 B ≈ 32 MB.  At ~600 byte/sec that's ~30 min of history. */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define SIO_TRACE_CAP (1 << 8)
++#else
+ #define SIO_TRACE_CAP (1 << 20)
++#endif
+ 
+ typedef struct {
+     uint32_t seq;           /* monotonic sequence number */
+@@ -272,7 +277,12 @@
+  * One entry per card protocol transaction (0x81 → terminal state / abort).
+  * Always-on.  64K entries × ~544 B ≈ 35 MB — holds tens of minutes of card
+  * activity at typical detection-cycle rates. */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define SIO_TXN_CAP (1 << 8)
++#else
+ #define SIO_TXN_CAP        (1 << 16)
++#endif
+ #define SIO_TXN_MAX_BYTES  256
+ 
+ typedef enum {
+@@ -316,7 +326,12 @@
+  *
+  * Captures every time IRQ #7 (SIO0) is raised into I_STAT.  Always-on.
+  * 1M entries × ~64 B ≈ 64 MB — holds tens of minutes of IRQ history. */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define SIO_IRQ_RING_CAP (1 << 8)
++#else
+ #define SIO_IRQ_RING_CAP (1 << 20)
++#endif
+ 
+ typedef enum {
+     SIO_IRQ_SRC_UNKNOWN  = 0,
+--- a/runtime/src/spu.c
++++ b/runtime/src/spu.c
+@@ -112,7 +112,12 @@
+ /* 1M entries × ~32B = 32 MB. Power of 2 so wrap is a mask. Beetle peaks at
+  * a few hundred audible-voice events per chime second; recomp at <1k total
+  * per chime. 1M gives ~minutes of headroom for game-scene capture too. */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define SPU_EVENT_CAP (1u << 8)
++#else
+ #define SPU_EVENT_CAP (1u << 20)
++#endif
+ static SpuEvent  s_events[SPU_EVENT_CAP];
+ static uint32_t  s_event_idx = 0;
+ static uint64_t  s_event_seq = 0;
+--- a/runtime/src/overlay_loader.c
++++ b/runtime/src/overlay_loader.c
+@@ -4319,7 +4319,12 @@
+     uint32_t in_regs[34];    /* r0..r31, hi, lo at entry                       */
+     uint32_t out_regs[34];   /* r0..r31, hi, lo at exit                        */
+ } FpEnt;
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define FP_CAP (1u << 6)
++#else
+ #define FP_CAP (1u << 16)   /* ~19 MB with full reg files; ~65K executions     */
++#endif
+ static FpEnt    s_fp[FP_CAP];
+ static uint64_t s_fp_seq = 0;
+ 
+--- a/runtime/src/device_trace.c
++++ b/runtime/src/device_trace.c
+@@ -4,9 +4,14 @@
+ #include "device_trace.h"
+ #include <string.h>
+ 
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define DEVTRACE_RING_CAP (1u << 8)
++#else
+ #define DEVTRACE_RING_CAP (1u << 20)  /* 1M events (~24 MB); covers the whole
+                                        * boot->wedge window so the divergent
+                                        * event is in-window, never evicted. */
++#endif
+ 
+ static DevEvent  s_ring[DEVTRACE_RING_CAP];
+ static uint64_t  s_seq   = 0;
+--- a/runtime/src/audio_trace.c
++++ b/runtime/src/audio_trace.c
+@@ -18,7 +18,12 @@
+ #define PCM_RING_MASK   (PCM_RING_FRAMES - 1u)
+ #endif
+ 
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define EV_RING_CAP (1u << 8)
++#else
+ #define EV_RING_CAP  (1u << 19)
++#endif
+ #define EV_RING_MASK (EV_RING_CAP - 1u)
+ 
+ /* Audibility threshold shared with snesrecomp's dropped_audible metric:
+--- a/runtime/src/parity_trace.c
++++ b/runtime/src/parity_trace.c
+@@ -5,9 +5,14 @@
+ #include "psx_bss.h"
+ #include <string.h>
+ 
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define PARITY_RING_CAP 256u
++#else
+ #define PARITY_RING_CAP 131072u  /* power of two; ~128K thread1 events of history
+                                   * so the parked-thread1 divergence is in-window,
+                                   * not just the wedge tail (~7.5 MB ring). */
++#endif
+ 
+ static PSX_BSS ParityEntry s_ring[PARITY_RING_CAP];
+ static uint64_t    s_seq      = 0;
+--- a/runtime/src/debug_server.c
++++ b/runtime/src/debug_server.c
+@@ -213,7 +213,12 @@
+  * writes (previously the blind spot), MMIO writes, and MMIO reads. The literal
+  * first divergent ACCESS (read or write) is the first index whose tuple differs
+  * between two runs. */
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define REC_CAP 1024
++#else
+ #define REC_CAP 400000
++#endif
+ #define REC_KIND_RAM_W   0   /* main-RAM write   */
+ #define REC_KIND_SP_W    1   /* scratchpad write */
+ #define REC_KIND_MMIO_W  2   /* device-register write */
+@@ -595,7 +600,12 @@
+ static PSX_BSS ThreadTraceEntry s_thread_trace[THREAD_TRACE_CAP];
+ static uint64_t s_thread_trace_seq = 0;
+ 
++#ifdef PSX_NO_DEBUG_TOOLS
++/* Release (PSX_NO_DEBUG_TOOLS, local patch 0009): a small ring; a 1 GB device cannot hold the diagnostic one. */
++#define SREG_TRACE_CAP (1 << 8)
++#else
+ #define SREG_TRACE_CAP (1 << 18)
++#endif
+ typedef struct {
+     uint64_t seq;
+     uint32_t tcb;

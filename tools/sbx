@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run a command with networking disabled (its own empty network namespace) and psxrecomp's dependency
+# downloads off. Every configure, build and codegen step of a recomp module goes through here.
+export PSX_DEPS_OFFLINE=1
+exec bwrap --dev-bind / / --unshare-net -- "$@"

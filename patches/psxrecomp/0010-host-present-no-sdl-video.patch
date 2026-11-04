@@ -1,0 +1,48 @@
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -16171,7 +16171,10 @@
+ #ifdef SDL_HINT_WINDOWS_DPI_SCALING
+     SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "0");
+ #endif
+-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
++        /* A host that shows the frames itself (psx_host_present, local patch 0010: Deadstation on the
++         * Brick, whose SDL2 has no dummy video driver) gets no SDL video, window or renderer. */
++        if (SDL_Init(psx_host_present ? SDL_INIT_GAMECONTROLLER
++                                      : SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+             std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+             return 1;
+         }
+@@ -16252,6 +16255,7 @@
+      * height follows the configured display aspect (4:3 native, wider for the
+      * widescreen hack); the present path letterboxes to the same aspect, so
+      * the image scales to fill the larger window with no further distortion. */
++  if (!psx_host_present) {
+     int game_w = g_video_win_w, game_h = 0;
+     clamp_window_aspect(&game_w, &game_h, g_video_aspect_num, g_video_aspect_den);
+     sdl_window = SDL_CreateWindow(
+@@ -16277,6 +16281,7 @@
+      * record it so driver vsync can own cadence. Re-probed while running so
+      * mixed-refresh multi-monitor moves cannot leave this latched at startup. */
+     refresh_host_display_cadence(1, 1);
++  }
+ 
+     /* OpenGL backend: create the GL context now. On failure, relabel the
+      * facade back to software (rasterization already runs through software in
+@@ -16406,7 +16411,7 @@
+      * presentation hang; macOS/Linux have no GDI path, so let SDL choose its
+      * native backend (Metal on Apple Silicon). PRESENTVSYNC removes tearing;
+      * fall back progressively if a driver can't provide vsync/accel. */
+-  if (!g_gl_active && !g_vk_active) {
++  if (!g_gl_active && !g_vk_active && !psx_host_present) {
+ #ifdef _WIN32
+     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+ #endif
+@@ -16452,7 +16457,7 @@
+         }
+     }
+ 
+-  if (!g_gl_active && !g_vk_active) {
++  if (!g_gl_active && !g_vk_active && !psx_host_present) {
+     const int tex_scale = netplay_cpu_auth_gpu() ? 1 : g_video_scale;
+     if (ensure_sdl_present_texture(
+             640 * tex_scale,

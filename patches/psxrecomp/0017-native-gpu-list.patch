@@ -1,0 +1,106 @@
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -3610,3 +3610,15 @@
+     trace_cdrom('M', (uint32_t)index_1based, 1u, 0);
+     return 1;
+ }
++
++/* Local patch 0017: one sector's 2048 user bytes from the disc image (as a read would leave them in RAM), for a host
++ * that replaces a game's disc loader (Deadstation's native SDK, recomp/brick/psx_sdk.cpp). 0: no disc or no sector. */
++int psx_cdrom_read_user_sector(uint32_t lba, uint8_t *out) {
++    uint8_t raw[RAW_SECTOR_SIZE];
++    if (!iso_handle) return 0;
++    if (iso_read_raw_sector(iso_handle, lba, raw, RAW_SECTOR_SIZE)) {
++        memcpy(out, raw + RAW_USER_DATA_OFFSET, SECTOR_SIZE);
++        return 1;
++    }
++    return iso_read_sector(iso_handle, lba, out, SECTOR_SIZE);
++}
+--- a/runtime/src/dma.c
++++ b/runtime/src/dma.c
+@@ -752,6 +752,70 @@
+     gpu_ll_complete
+ };
+ 
++/* Local patch 0017: a display list (ordering table) sent to the GPU at once by the host, for a native libgpu
++ * DrawOTag (Deadstation's recomp/brick/psx_sdk.cpp): the same reads, address resolution and GP0 writes as the DMA
++ * walker, with no DMA channel, timing or interrupt (no hardware transfer happens). Returns the words sent. */
++static void native_list_complete(void *opaque, int hit_limit) { (void)opaque; (void)hit_limit; }
++/* Local patch 0017: a GPU DMA (block or linked list) started and not finished: the GPU's port belongs to it, so a host
++ * sending commands itself (Deadstation's native libgpu) leaves the call to the game's library, which queues behind it. */
++int psx_gpu_dma_busy(void) {
++    return ((channels[2].chcr >> 24) & 1u) != 0 || gpu_linked_list.active != 0;
++}
++
++/* Local patch 0017: bytes of disc data from lba on, 2048 a sector, into guest RAM at dest, written as the CD DMA writes
++ * them (each word through the RAM path, code pages marked, overlay capture told), with no drive, interrupt or DMA:
++ * a host's native disc loader. Each sector's last partial word is not written (as a word DMA of bytes / 4). 0: a sector
++ * could not be read. */
++int psx_cdrom_read_user_sector(uint32_t lba, uint8_t *out);
++int psx_native_cd_read(uint32_t lba, uint32_t dest, uint32_t bytes) {
++    extern uint8_t *memory_get_ram_ptr(void);
++    uint8_t sector[2048];
++    uint32_t addr = DMA_RAM_ADDR(dest);
++    const uint32_t start = addr, total = bytes;
++    if (bytes == 0) return 1;
++    if (addr < psx_ram_live_bytes()) {
++        uint32_t span = bytes;
++        if (span > psx_ram_live_bytes() - addr) span = psx_ram_live_bytes() - addr;
++        overlay_capture_before_dma(addr, span);
++    }
++    while (bytes > 0) {
++        const uint32_t n = bytes < 2048u ? bytes : 2048u;
++        if (!psx_cdrom_read_user_sector(lba, sector)) return 0;
++        for (uint32_t i = 0; i + 4u <= n; i += 4u) {
++            uint32_t word;
++            memcpy(&word, sector + i, 4);
++            psx_write_word(DMA_RAM_ADDR(addr + i), word);
++        }
++        dirty_ram_mark_executable_range(addr, n & ~3u);
++        addr = DMA_RAM_ADDR(addr + 2048u);
++        bytes -= n;
++        lba++;
++    }
++    if (start < psx_ram_live_bytes()) {
++        uint32_t span = total;
++        if (span > psx_ram_live_bytes() - start) span = psx_ram_live_bytes() - start;
++        overlay_capture_on_dma(start, span, memory_get_ram_ptr() + start);
++    }
++    return 1;
++}
++
++uint32_t psx_native_gpu_list(uint32_t addr) {
++    static const DMAGPULinkedListOps ops = {
++        gpu_ll_resolve_address,
++        gpu_ll_read_word,
++        gpu_ll_observe_header,
++        gpu_ll_begin_node,
++        gpu_ll_emit_word,
++        native_list_complete
++    };
++    DMAGPULinkedList list;
++    memset(&list, 0, sizeof(list));
++    dma_gpu_ll_start(&list, psx_mod_gpu_dma_resolve_address(addr & 0x00FFFFFFu), 0x40000u);
++    while (list.active)
++        dma_gpu_ll_advance(&list, UINT32_MAX, &ops, NULL);
++    return list.total_words;
++}
++
+ static void start_async_gpu_linked_list(void) {
+     if (gpu_linked_list.active) {
+         gpu_ot_stats.starts_dropped++;
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -2853,6 +2853,12 @@
+                            vram_write_w, vram_write_h);
+ }
+ 
++/* Local patch 0017: GP0 between commands (none being collected, no image transfer under way), for a host that sends
++ * whole commands to the port itself (Deadstation's native libgpu, recomp/brick/psx_sdk.cpp). */
++int psx_gpu_gp0_idle(void) {
++    return gp0_state == GP0_IDLE && vram_write_remaining == 0;
++}
++
+ /* VRAM read transfer state (VRAM→CPU, command 0xC0) */
+ static int      vram_read_active;
+ static uint16_t vram_read_x, vram_read_y;

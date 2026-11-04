@@ -1,0 +1,126 @@
+--- a/runtime/src/iso_reader.cpp
++++ b/runtime/src/iso_reader.cpp
+@@ -7,6 +7,10 @@
+ #include <cstring>
+ #include <cstdio>
+ #include <limits>
++#include <condition_variable>
++#include <cstdlib>
++#include <mutex>
++#include <thread>
+ 
+ namespace PS1 {
+ 
+@@ -76,12 +80,83 @@
+     uint32_t disc_sector_count = 0;
+     std::vector<uint8_t> hunk;
+     std::vector<CHDSpan> spans;
++    /* Local patch 0023 (Deadstation): the next hunk decompressed ahead on a worker thread. A hunk is 8 sectors; its
++     * decompression (and the CD ECC libchdr regenerates) took milliseconds on the game's thread each time a stream
++     * crossed into one. The lock covers the chd_file (libchdr is not thread-safe) and the cache; the worker holds it
++     * while it decompresses, so a read that needs another hunk then waits as it would for the file anyway.
++     * DEADSTATION_CHD_READAHEAD=0: none. */
++    struct Ahead {
++        uint32_t hunk = std::numeric_limits<uint32_t>::max();
++        bool ready = false;
++        std::vector<uint8_t> data;
++    };
++    std::mutex lock;
++    std::condition_variable cv;
++    Ahead ahead[2];
++    unsigned next_ahead = 0;
++    uint32_t wanted = std::numeric_limits<uint32_t>::max();
++    std::thread worker;
++    bool stop = false, threaded = false;
+ 
+     ~CHDState() {
++        if (threaded) {
++            {
++                std::lock_guard<std::mutex> hold(lock);
++                stop = true;
++            }
++            cv.notify_all();
++            worker.join();
++        }
+         if (file) chd_close(file);
+     }
+ };
+ 
++static void chd_ahead_worker(CHDState* chd) {
++    const uint32_t none = std::numeric_limits<uint32_t>::max();
++    std::unique_lock<std::mutex> hold(chd->lock);
++    for (;;) {
++        chd->cv.wait(hold, [&] { return chd->stop || chd->wanted != none; });
++        if (chd->stop) return;
++        const uint32_t h = chd->wanted;
++        chd->wanted = none;
++        bool have = false;
++        for (const CHDState::Ahead& a : chd->ahead)
++            have = have || a.hunk == h;
++        if (have) continue;
++        CHDState::Ahead& slot = chd->ahead[chd->next_ahead++ % 2];
++        slot.hunk = h;
++        slot.ready = false;
++        slot.data.resize(chd->hunk_bytes);
++        slot.ready = chd_read(chd->file, h, slot.data.data()) == CHDERR_NONE;
++        if (!slot.ready) slot.hunk = none;
++    }
++}
++
++/* the hunk into chd.hunk: from the cache when the worker made it, else read here */
++static bool chd_fetch(CHDState& chd, uint32_t h) {
++    if (!chd.threaded)
++        return chd_read(chd.file, h, chd.hunk.data()) == CHDERR_NONE;
++    std::lock_guard<std::mutex> hold(chd.lock);
++    for (CHDState::Ahead& a : chd.ahead)
++        if (a.hunk == h && a.ready && a.data.size() == chd.hunk.size()) {
++            std::swap(a.data, chd.hunk);
++            a.hunk = std::numeric_limits<uint32_t>::max();
++            a.ready = false;
++            return true;
++        }
++    return chd_read(chd.file, h, chd.hunk.data()) == CHDERR_NONE;
++}
++
++/* the worker asked for the hunk after h */
++static void chd_want(CHDState& chd, uint32_t h) {
++    if (!chd.threaded) return;
++    {
++        std::lock_guard<std::mutex> hold(chd.lock);
++        chd.wanted = h;
++    }
++    chd.cv.notify_one();
++}
++
+ static bool parse_chd_track_mode(const char* text, CHDTrackMode& mode) {
+     if (std::strcmp(text, "MODE1") == 0) mode = CHDTrackMode::Mode1;
+     else if (std::strcmp(text, "MODE1_RAW") == 0) mode = CHDTrackMode::Mode1Raw;
+@@ -125,11 +200,12 @@
+     if (hunk_offset + CD_MAX_SECTOR_DATA > chd.hunk.size()) return false;
+ 
+     if (chd.current_hunk != hunk_index) {
+-        if (chd_read(chd.file, hunk_index, chd.hunk.data()) != CHDERR_NONE) {
++        if (!chd_fetch(chd, hunk_index)) {
+             chd.current_hunk = std::numeric_limits<uint32_t>::max();
+             return false;
+         }
+         chd.current_hunk = hunk_index;
++        chd_want(chd, hunk_index + 1);
+     }
+ 
+     std::memcpy(buffer, chd.hunk.data() + hunk_offset, RAW_SECTOR_SIZE);
+@@ -257,6 +333,14 @@
+         state->disc_sector_count = disc_lba;
+         bin_path_ = filename;
+         chd_ = std::move(state);
++        {
++            /* local patch 0023: the read-ahead worker */
++            const char* ahead = std::getenv("DEADSTATION_CHD_READAHEAD");
++            if (ahead == nullptr || std::strcmp(ahead, "0") != 0) {
++                chd_->threaded = true;
++                chd_->worker = std::thread(chd_ahead_worker, chd_.get());
++            }
++        }
+         is_open_ = true;
+         if (!ParseVolumeDescriptor()) {
+             volume_id_.clear();

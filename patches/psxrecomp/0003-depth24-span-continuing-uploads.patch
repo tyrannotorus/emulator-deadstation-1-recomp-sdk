@@ -1,0 +1,24 @@
+diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
+index 6f0236ae..bf6236e3 100644
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -3624,10 +3624,16 @@ static uint8_t gpu_vram_byte(uint32_t byte_x, uint32_t y) {
+ /* Depth24: note/query/reset the CPU→VRAM upload span tracked above. Used to
+  * hide trailing RGB columns when a movie blit doesn't fill the full CRTC
+  * width — MotK's Star Wars crawl leaves ~8px of stale VRAM on the right.
+- * Only FB-class A0s (w >= 256 halfwords) grow the span; texture uploads must
+- * not collapse it. During present-hold, ignore updates entirely. */
++ * FB-class A0s (w >= 256 halfwords) grow the span, and so does a narrower A0
++ * that continues it (starts at or before its current end): Tobal No. 2's intro
++ * uploads each 480-halfword frame as a 256-wide blit plus narrower ones, and
++ * counting only the first capped the span at 256 halfwords, blanking the right
++ * half of the movie. Unrelated texture uploads elsewhere still cannot grow it.
++ * During present-hold, ignore updates entirely. */
+ static void depth24_note_upload(uint32_t x, uint32_t w) {
+-    if (!(display_depth & 1u) || w < 256u) return;
++    if (!(display_depth & 1u)) return;
++    if (w < 256u && !(s_d24_upload_x1 > 0u && x <= s_d24_upload_x1 && x + w > s_d24_upload_x1))
++        return;
+     if (s_d24_present_hold > 0) return;
+     uint32_t x1 = x + w;
+     if (x1 > 1024u) x1 = 1024u;

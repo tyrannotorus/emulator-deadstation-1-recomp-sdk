@@ -1,0 +1,23 @@
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -4680,6 +4680,12 @@
+     psx_keybinds_init(argv0);
+ }
+ 
++/* Local patch 0031: input.ini read again at a host's word, its controls changed while the guest is held. */
++static const char* s_input_argv0 = nullptr;
++extern "C" void psx_host_reload_input(void) {
++    if (s_input_argv0) load_input_config(s_input_argv0);
++}
++
+ static void close_player(PlayerInput& p) {
+     if (p.handle) {
+         if (p.rumble_small || p.rumble_large)
+@@ -16195,6 +16201,7 @@
+             return 1;
+         }
+     }
++    s_input_argv0 = argv[0];
+     load_input_config(argv[0]);
+     /* The launcher / settings.toml / game.toml deadzone (when set) is the
+      * user-facing authority; apply it over the input.ini value here, after

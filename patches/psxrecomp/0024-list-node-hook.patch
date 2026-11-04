@@ -1,0 +1,28 @@
+--- a/runtime/src/dma.c
++++ b/runtime/src/dma.c
+@@ -735,9 +735,14 @@
+     return psx_read_word(address);
+ }
+ 
++/* Local patch 0024: told of every node a display list walk reaches, before its packet goes to the GPU: a module drawing
++ * its models natively (a module's plugin) puts them in at their place in the game's order. */
++void (*psx_gpu_list_node_hook)(uint32_t addr) = NULL;
++
+ static void gpu_ll_observe_header(void *opaque, uint32_t addr,
+                                   uint32_t header) {
+     (void)opaque;
++    if (psx_gpu_list_node_hook) psx_gpu_list_node_hook(addr);
+     gpu_ws_validate_linked_list_header(addr, header);
+ }
+ 
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -2939,6 +2939,8 @@
+ 
+ /* Draw offset (set by GP0(E5h)) */
+ static int32_t draw_offset_x, draw_offset_y;
++/* Local patch 0024: the draw offset, for a module drawing its models natively */
++void psx_gpu_draw_offset(int32_t *x, int32_t *y) { *x = draw_offset_x; *y = draw_offset_y; }
+ /* Instrumentation: per-vblank range/count of GP0(E5) draw-offset-Y sets. If a
+  * single frame sets offsets in BOTH the top (y<128) and bottom (y>=128) buffer
+  * bands, the game is drawing different parts of the scene into different display

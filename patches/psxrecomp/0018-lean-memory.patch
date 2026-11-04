@@ -1,0 +1,180 @@
+--- a/runtime/src/card_data_writes.c
++++ b/runtime/src/card_data_writes.c
+@@ -9,7 +9,9 @@
+ 
+ /* "Armed" byte from the most recent SIO_RX_DATA read inside a card
+  * data phase. The next matching RAM write captures it. */
+-static volatile int      s_armed = 0;
++/* Local patch 0018: the armed flag global, for the lean store path's one test (memory.c) */
++volatile int g_card_data_writes_armed = 0;
++#define s_armed g_card_data_writes_armed
+ static uint8_t           s_armed_value = 0;
+ static uint16_t          s_armed_state = 0;
+ static uint8_t           s_armed_idx   = 0;
+--- a/runtime/src/memory.c
++++ b/runtime/src/memory.c
+@@ -2043,7 +2043,67 @@
+ }
+ 
+ static void psx_write_word_raw(uint32_t addr, uint32_t val);
++
++#ifdef PSX_LEAN
++/* Local patch 0018 (lean memory): a guest store written straight when it needs no store hook but the text guard. RAM
++ * outside the kernel window, D44 and every executed or overlay-watched page (the text guard run inline: it acts only
++ * inside the game's text image), and the scratchpad, while no lockstep, recording, render pass, overlay cycle flush,
++ * cache isolation or armed trace is about: every other hook a store runs acts only on those ranges or with its trace
++ * armed, so writing straight changes nothing else. 0: the full path. */
++extern volatile int g_card_data_writes_armed, g_parity_trace_armed;
++/* The pages holding compiled game code (patch 0021's code ranges): the text guard matters only there (a store to the
++ * EXE's data and BSS changes no compiled function's bytes). Built at the first store; all pages when the game has no
++ * code ranges (a BIOS-only runtime). */
++extern void psx_game_each_code_range(void (*fn)(uint32_t lo, uint32_t len)) __attribute__((weak));
++static uint32_t s_code_pages[(PSX_MAIN_RAM_WINDOW_BYTES >> DIRTY_RAM_PAGE_SHIFT) / 32u];
++static int s_code_pages_built = 0;
++static void lean_mark_code(uint32_t lo, uint32_t len) {
++    if (len == 0) return;
++    const uint32_t a = lo & 0x1FFFFFFFu;
++    if (a >= PSX_MAIN_RAM_WINDOW_BYTES) return;
++    uint32_t p0 = (a & g_psx_ram_mask) >> DIRTY_RAM_PAGE_SHIFT, p1 = ((a & g_psx_ram_mask) + len - 1u) >> DIRTY_RAM_PAGE_SHIFT;
++    for (uint32_t p = p0; p <= p1 && p < (PSX_MAIN_RAM_WINDOW_BYTES >> DIRTY_RAM_PAGE_SHIFT); p++)
++        s_code_pages[p >> 5] |= 1u << (p & 31u);
++}
++static inline int lean_code_page(uint32_t phys) {
++    if (!s_code_pages_built) {
++        s_code_pages_built = 1;
++        if (psx_game_each_code_range) psx_game_each_code_range(lean_mark_code);
++        else memset(s_code_pages, 0xFF, sizeof(s_code_pages));
++    }
++    const uint32_t p = phys >> DIRTY_RAM_PAGE_SHIFT;
++    return (s_code_pages[p >> 5] >> (p & 31u)) & 1u;
++}
++static inline int lean_store(uint32_t addr, uint32_t val, uint32_t size) {
++    extern void (*g_overlay_flush_pending_cycles)(void);
++    if (g_ls_mode != 0 || g_ds_recording || g_psx_render_pass_active || g_overlay_flush_pending_cycles ||
++        g_card_data_writes_armed || g_parity_trace_armed || addr >= 0xC0000000u || cpu_store_isolated())
++        return 0;
++    const uint32_t a = addr & 0x1FFFFFFFu;
++    if (a < PSX_MAIN_RAM_WINDOW_BYTES) {
++        const uint32_t phys = a & g_psx_ram_mask;
++        if (phys < DIRTY_RAM_KERNEL_TRACK_BYTES || phys + size > RAM_LIVE) return 0;
++        if (phys + size > D44_PHYS && phys < D44_PHYS + 4u) return 0;
++        const uint32_t pg = phys >> DIRTY_RAM_PAGE_SHIFT;
++        if (((g_dirty_ram_exec_page_bitmap[pg >> 5] | overlay_watch_bitmap[pg >> 5]) >> (pg & 31u)) & 1u) return 0;
++        g_guest_store_count++;
++        if (lean_code_page(phys))
++            text_guard_note_write(phys, val, (int)size);
++        memcpy(ram + phys, &val, size);
++        return 1;
++    }
++    if (a >= 0x1F800000u && a + size <= 0x1F800400u) {
++        g_guest_store_count++;
++        memcpy(scratchpad + (a - 0x1F800000u), &val, size);
++        return 1;
++    }
++    return 0;
++}
++#endif
+ void psx_write_word(uint32_t addr, uint32_t val) {
++#ifdef PSX_LEAN
++    if (lean_store(addr, val, 4u)) return;
++#endif
+     extern void (*g_overlay_flush_pending_cycles)(void);
+     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
+     if (g_psx_render_pass_active) { render_pass_store(addr, val, 4); return; }
+@@ -2254,6 +2314,9 @@
+ 
+ static void psx_write_half_raw(uint32_t addr, uint16_t val);
+ void psx_write_half(uint32_t addr, uint16_t val) {
++#ifdef PSX_LEAN
++    if (lean_store(addr, val, 2u)) return;
++#endif
+     extern void (*g_overlay_flush_pending_cycles)(void);
+     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
+     if (g_psx_render_pass_active) { render_pass_store(addr, val, 2); return; }
+@@ -2502,6 +2565,12 @@
+  * PSX_ENABLE_BLOCK_CYCLES so the Beetle-oracle build (cycles off) does a plain read. */
+ static inline void psx_cyc_load_timing(CPUState* cpu, uint32_t addr, uint32_t size,
+                                        uint32_t rt, uint32_t reg_mask) {
++#ifdef PSX_LEAN
++    /* Local patch 0018 (lean memory): every load the flat lean charge, as the inline RAM loads (psx_cyc.h) */
++    (void)cpu; (void)addr; (void)size; (void)rt; (void)reg_mask;
++    psx_cyc_charge(PSX_LEAN_LOAD);
++    return;
++#endif
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+     /* Bisect gate (PSX_LOAD_DELAY=0): disable the R3000A load-delay interlock
+      * timing (the d8c4a8e/fade560/d597797 feature) to test whether it moves the
+@@ -2552,12 +2621,28 @@
+ #endif
+ 
+ /* Slow paths for the inlined helpers in psx_cyc.h (MMIO / lockstep / shards). */
++#ifdef PSX_LEAN
++/* Local patch 0018 (lean memory): a load from the scratchpad, its bytes' host address (the D-cache: no device, no
++ * hook), while no lockstep, recording or read watch is about. NULL: the full path. */
++static inline const uint8_t *lean_scratchpad_source(uint32_t addr, uint32_t size) {
++    const uint32_t a = addr & 0x1FFFFFFFu;
++    if (a < 0x1F800000u || a + size > 0x1F800400u || addr >= 0xC0000000u) return NULL;
++    if (g_ls_mode != 0 || g_ls_replay_active || g_ds_recording || g_ram_read_watch_active) return NULL;
++    return scratchpad + (a - 0x1F800000u);
++}
++#endif
+ uint32_t psx_cyc_load_word_slow(CPUState* cpu, uint32_t addr, uint32_t rt, uint32_t reg_mask) {
+     psx_cyc_load_timing(cpu, addr, 4u, rt, reg_mask);
++#ifdef PSX_LEAN
++    { const uint8_t *p = lean_scratchpad_source(addr, 4u); if (p) { uint32_t v; memcpy(&v, p, 4); return v; } }
++#endif
+     return psx_read_word(addr);
+ }
+ uint16_t psx_cyc_load_half_slow(CPUState* cpu, uint32_t addr, uint32_t rt, uint32_t reg_mask) {
+     psx_cyc_load_timing(cpu, addr, 2u, rt, reg_mask);
++#ifdef PSX_LEAN
++    { const uint8_t *p = lean_scratchpad_source(addr, 2u); if (p) { uint16_t v; memcpy(&v, p, 2); return v; } }
++#endif
+     return psx_read_half(addr);
+ }
+ void psx_cyc_load_word_timing_only(CPUState* cpu, uint32_t addr,
+@@ -2570,6 +2655,9 @@
+     uint32_t phys;
+     if (psx_cyc_main_ram_fast_addr(addr, 1u, &phys)) return ram[phys];
+ #endif
++#ifdef PSX_LEAN
++    { const uint8_t *p = lean_scratchpad_source(addr, 1u); if (p) return *p; }
++#endif
+     return psx_read_byte(addr);
+ }
+ 
+@@ -2577,7 +2665,10 @@
+  * psx_gte_stall — both emitted before this call. 32-bit access, completion +1, no
+  * LDWhich arm. */
+ uint32_t psx_cyc_lwc2_read(CPUState* cpu, uint32_t addr) {
+-#ifdef PSX_ENABLE_BLOCK_CYCLES
++#if defined(PSX_LEAN)
++    psx_cyc_charge(PSX_LEAN_LOAD);
++    { const uint8_t *p = lean_scratchpad_source(addr, 4u); if (p) { uint32_t v; memcpy(&v, p, 4); return v; } }
++#elif defined(PSX_ENABLE_BLOCK_CYCLES)
+     psx_cyc_readmem(cpu, addr & 0x1FFFFFFFu, 4u, 1u, 0x20u);
+ #else
+     (void)cpu;
+@@ -2602,6 +2693,9 @@
+ 
+ static void psx_write_byte_raw(uint32_t addr, uint8_t val);
+ void psx_write_byte(uint32_t addr, uint8_t val) {
++#ifdef PSX_LEAN
++    if (lean_store(addr, val, 1u)) return;
++#endif
+     extern void (*g_overlay_flush_pending_cycles)(void);
+     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
+     if (g_psx_render_pass_active) { render_pass_store(addr, val, 1); return; }
+--- a/runtime/src/parity_trace.c
++++ b/runtime/src/parity_trace.c
+@@ -65,7 +65,9 @@
+     s_rseq = 0;
+ }
+ 
+-void parity_trace_arm(int on)        { s_armed = on ? 1u : 0u; }
++/* Local patch 0018: the armed flag mirrored for the lean store path's one test (memory.c) */
++volatile int g_parity_trace_armed = 0;
++void parity_trace_arm(int on)        { s_armed = on ? 1u : 0u; g_parity_trace_armed = (int)s_armed; }
+ void parity_trace_reset(void)        {
+     s_seq = 0; s_frozen = 0; memset(s_ring, 0, sizeof(s_ring));
+     s_rseq = 0; memset(s_rring, 0, sizeof(s_rring));

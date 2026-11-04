@@ -1,0 +1,42 @@
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -1357,6 +1357,39 @@
+     return out_frames;
+ }
+ 
++/* Local patch 0026: the disc's contents for a module with no drive (Deadstation's native LIBDS,
++ * a module's plugin): raw sectors, the track table, and its audio decoded and mixed straight into the SPU's CD input.
++ * None of this touches the drive model, which stays idle. */
++int psx_native_raw_sector(uint32_t lba, uint8_t *raw) {
++    return iso_handle && iso_read_raw_sector(iso_handle, lba, raw, RAW_SECTOR_SIZE);
++}
++int psx_native_track_count(void) { return iso_handle ? iso_track_count(iso_handle) : 0; }
++uint32_t psx_native_track_start(int track) { return iso_handle ? iso_track_start_lba(iso_handle, track) : 0u; }
++uint32_t psx_native_disc_sectors(void) { return iso_handle ? iso_sector_count(iso_handle) : 0u; }
++void psx_native_xa_start(void) { xa_reset_decode(); }
++void psx_native_xa_sector(const uint8_t *raw) {
++    const uint8_t coding = raw[XA_SUBHEADER_OFFSET + 3];
++    const int stereo = (coding & 0x01u) != 0, rate_code = (coding >> 2) & 0x03, depth_code = (coding >> 4) & 0x03;
++    const int sample_rate = rate_code == 0 ? 37800 : (rate_code == 1 ? 18900 : 0);
++    int16_t native[XA_NATIVE_FRAMES * 2];
++    int16_t pcm_44100[XA_MAX_44100_FRAMES * 2];
++    if (depth_code != 0 || sample_rate == 0) return;
++    const int native_frames = stereo ? xa_decode_sector_4bit_stereo(raw + XA_DATA_OFFSET, native)
++                                     : xa_decode_sector_4bit_mono(raw + XA_DATA_OFFSET, native);
++    const int out_frames = xa_resample_to_44100(native, native_frames, sample_rate, pcm_44100, XA_MAX_44100_FRAMES);
++    cd_apply_decode_volume(pcm_44100, out_frames);
++    spu_cd_audio_push(pcm_44100, out_frames);
++}
++void psx_native_cdda_sector(const uint8_t *raw) {
++    int16_t pcm[CDDA_SECTOR_FRAMES * 2];
++    memcpy(pcm, raw, sizeof(pcm));
++    cd_apply_decode_volume(pcm, CDDA_SECTOR_FRAMES);
++    spu_cd_audio_push(pcm, CDDA_SECTOR_FRAMES);
++}
++void psx_native_cd_mix(uint8_t l_to_l, uint8_t l_to_r, uint8_t r_to_r, uint8_t r_to_l) {
++    cd_decode_vol[0][0] = l_to_l, cd_decode_vol[0][1] = l_to_r, cd_decode_vol[1][1] = r_to_r, cd_decode_vol[1][0] = r_to_l;
++}
++
+ /* Always-on XA zero-run scanner (audio_trace event ring). Decoded XA music
+  * must not contain long exact-zero spans when the source sectors are dense;
+  * a run here localizes corruption to a pipeline stage (stage 0 = straight

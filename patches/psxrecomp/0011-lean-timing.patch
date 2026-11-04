@@ -1,0 +1,155 @@
+--- a/runtime/include/psx_cyc.h
++++ b/runtime/include/psx_cyc.h
+@@ -40,6 +40,17 @@
+ extern "C" {
+ #endif
+ 
++/* PSX_LEAN_TIMING (local patch 0011; Deadstation's Brick builds): the CPU's time in whole instructions instead
++ * of Beetle's pipeline model. Each instruction charges PSX_LEAN_CPI cycles and each main-RAM load
++ * PSX_LEAN_LOAD cycles into the batch, with no load-delay interlocks or instruction cache; the batch is
++ * published when the next device event is due (or at MMIO, as before), and a generated branch's interrupt
++ * check returns at once unless an event is due or an interrupt can be taken (interrupts.c). */
++#if defined(PSX_LEAN_TIMING) && !defined(PSX_OVERLAY_DLL_BUILD) && !defined(PSX_COSIM)
++#define PSX_LEAN 1
++#define PSX_LEAN_CPI  2u
++#define PSX_LEAN_LOAD 6u
++#endif
++
+ /* Load-charge batching (MotK VLC): cache the nearer of the next device
+  * deadline or a 64-cycle soft publication limit once per batch. Generated
+  * GCC/Clang blocks may defer to their IRQ edge; MMIO also flushes. Pipeline
+@@ -54,12 +65,18 @@
+ static inline void psx_cyc_local_begin(uint32_t *acc) { (void)acc; }
+ static inline void psx_cyc_local_end(void) { }
+ #else
++#ifdef PSX_LEAN
++static inline void psx_cyc_bb_defer_begin(void) { }
++static inline void psx_cyc_bb_defer_end(void) { }
++static inline void psx_cyc_bb_defer_flush(void) { }
++#else
+ static inline void psx_cyc_bb_defer_begin(void) { g_psx_cyc_bb_defer++; }
+ static inline void psx_cyc_bb_defer_end(void) {
+     if (g_psx_cyc_bb_defer > 0) g_psx_cyc_bb_defer--;
+     if (g_psx_cyc_bb_defer == 0) psx_cyc_batch_flush();
+ }
+ static inline void psx_cyc_bb_defer_flush(void) { psx_cyc_batch_flush(); }
++#endif
+ 
+ /* Install a function-local charge sink (MotK VLC leaves). Soft-cap publish
+  * at 1<<28 so uint32 cannot wrap; IRQ/MMIO still go through batch_flush. */
+@@ -92,6 +109,11 @@
+ 
+ static inline void psx_cyc_charge(uint32_t cycles) {
+     if (cycles == 0u) return;
++#ifdef PSX_LEAN
++    if (psx_in_device_service) { psx_cycle_count += (uint64_t)cycles; return; }
++    g_psx_cyc_batch += cycles;
++    return;
++#endif
+ #if defined(PSX_OVERLAY_DLL_BUILD)
+     psx_advance_cycles(cycles);
+ #else
+@@ -202,6 +224,11 @@
+  * reg_mask from psx_cyc_dep_res_mask(). MUST be emitted BEFORE the instruction
+  * body so §1 precedes any muldiv/GTE deadline stall in the body (Beetle order). */
+ static inline void psx_cyc_step(CPUState* cpu, uint32_t reg_mask) {
++#ifdef PSX_LEAN
++    (void)cpu; (void)reg_mask;
++    psx_cyc_charge(PSX_LEAN_CPI);
++    return;
++#endif
+     psx_cyc_base(cpu);
+     psx_cyc_deps(cpu, reg_mask);
+     psx_cyc_lds(cpu);
+@@ -237,6 +264,14 @@
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+     uint32_t phys = addr & 0x1FFFFFFFu;
+     if (g_ls_mode == 0 && !g_ds_recording && phys < 0x00800000u) {
++#ifdef PSX_LEAN
++        {
++            uint32_t value;
++            psx_cyc_charge(PSX_LEAN_LOAD);
++            memcpy(&value, g_psx_ram + (phys & g_psx_ram_mask), sizeof(value));
++            return value;
++        }
++#endif
+         if (g_psx_load_delay < 0) (void)psx_load_delay_enabled();
+         if (g_psx_load_delay) {
+             psx_cyc_base(cpu);
+@@ -267,6 +302,14 @@
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+     uint32_t phys = addr & 0x1FFFFFFFu;
+     if (g_ls_mode == 0 && !g_ds_recording && phys < 0x00800000u) {
++#ifdef PSX_LEAN
++        {
++            uint16_t value;
++            psx_cyc_charge(PSX_LEAN_LOAD);
++            memcpy(&value, g_psx_ram + (phys & g_psx_ram_mask), sizeof(value));
++            return value;
++        }
++#endif
+         if (g_psx_load_delay < 0) (void)psx_load_delay_enabled();
+         if (g_psx_load_delay) {
+             psx_cyc_base(cpu);
+@@ -306,6 +349,7 @@
+  * Returns the raw 32-bit value. */
+ extern uint32_t psx_cyc_lwc2_read(CPUState* cpu, uint32_t addr);
+ 
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/runtime/include/psx_icache.h
++++ b/runtime/include/psx_icache.h
+@@ -13,6 +13,10 @@
+ void psx_icache_reset(void);
+ void psx_icache_fetch(CPUState *cpu, uint32_t addr);
+ void psx_icache_fetch_miss(CPUState *cpu, uint32_t addr);
++#ifdef PSX_LEAN_TIMING
++/* Lean timing (local patch 0011): no instruction cache. */
++#define psx_icache_fetch(cpu, addr) ((void)(cpu), (void)(addr))
++#endif
+ 
+ /* BIU / cache control (0xFFFE0130) bits the cache model reads; names and values
+  * as Beetle's cpu.cpp BIU_* defines. */
+@@ -33,7 +37,7 @@
+ /* Keep the interpreter's steady-state tag hit inside its translation unit.
+  * Misses use the shared slow path, preserving exact cache evolution/timing. */
+ static inline void psx_icache_fetch_interp(CPUState *cpu, uint32_t addr) {
+-#ifdef PSX_ENABLE_BLOCK_CYCLES
++#if defined(PSX_ENABLE_BLOCK_CYCLES) && !defined(PSX_LEAN_TIMING)
+     if (g_ls_replay_active) return;
+     if (g_psx_icache_active < 0) {
+         psx_icache_fetch(cpu, addr);
+--- a/runtime/src/psx_icache.c
++++ b/runtime/src/psx_icache.c
+@@ -12,6 +12,7 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
++#undef psx_icache_fetch   /* defined here even with lean timing (local patch 0011) */
+ 
+ int psx_icache_enabled(void) {
+     static int s = -1;
+--- a/runtime/src/interrupts.c
++++ b/runtime/src/interrupts.c
+@@ -2174,6 +2174,19 @@
+  * here gives the mmx6 baseline interrupt behavior — sufficient to build+run the
+  * current generated code on the good baseline for instrumented comparison. */
+ void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
++#if defined(PSX_LEAN_TIMING) && !defined(PSX_COSIM)
++    /* Lean timing (local patch 0011): nothing to do while no device event is due (the cycle batch has not
++     * reached the next service cycle), no interrupt is pending that COP0 would take, and neither an
++     * exception nor a deferred thread switch is in progress. */
++    {
++        const uint32_t sr = cpu->cop0[COP0_SR];
++        if (psx_cycle_count + g_psx_cyc_batch < psx_next_service_cycle &&
++            !in_exception && !s_defer_switch_pending &&
++            (cpu->cop0[COP0_CAUSE] & sr & 0x300u) == 0u &&
++            ((i_stat & i_mask) == 0u || (sr & 0x401u) != 0x401u))
++            return;
++    }
++#endif
+     uint32_t prev = s_compiled_interrupt_resume_pc;
+     s_compiled_interrupt_resume_pc = resume_pc;
+     psx_check_interrupts(cpu); /* flushes load-charge batch on entry */

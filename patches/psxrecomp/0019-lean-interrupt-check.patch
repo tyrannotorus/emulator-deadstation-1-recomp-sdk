@@ -1,0 +1,79 @@
+--- a/runtime/include/interrupts.h
++++ b/runtime/include/interrupts.h
+@@ -155,4 +155,32 @@
+ }
+ #endif
+ 
++/* Local patch 0019 (lean timing): the interrupt check's fast path inline at every call site (generated code checks at
++ * each block boundary; the dispatch-entry check stays a call, the generated dispatcher declares it itself): nothing to do while no device event is due, no interrupt COP0 would take is pending, and no
++ * exception or deferred thread switch is in progress (the same test psx_check_interrupts_at begins with, patch 0011);
++ * otherwise the call. interrupts.c defines the functions themselves (PSXRECOMP_INTERRUPTS_IMPL). */
++#if defined(PSX_LEAN_TIMING) && !defined(PSX_COSIM) && !defined(PSXRECOMP_INTERRUPTS_IMPL) && !defined(PSX_OVERLAY_DLL_BUILD)
++#include "cpu_state.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern uint64_t psx_cycle_count, psx_next_service_cycle;
++extern uint32_t g_psx_cyc_batch;
++extern uint32_t i_stat, i_mask;
++extern int psx_lean_in_exception, psx_lean_defer_switch_pending;
++static inline int psx_interrupts_quiet(const struct CPUState* cpu) {
++    const uint32_t sr = cpu->cop0[12];
++    return psx_cycle_count + g_psx_cyc_batch < psx_next_service_cycle && !psx_lean_in_exception &&
++           !psx_lean_defer_switch_pending && (cpu->cop0[13] & sr & 0x300u) == 0u &&
++           ((i_stat & i_mask) == 0u || (sr & 0x401u) != 0x401u);
++}
++static inline void psx_check_interrupts_at_inline(struct CPUState* cpu, uint32_t resume_pc) {
++    if (!psx_interrupts_quiet(cpu)) (psx_check_interrupts_at)(cpu, resume_pc);
++}
++#ifdef __cplusplus
++}
++#endif
++#define psx_check_interrupts_at(cpu, pc) psx_check_interrupts_at_inline((cpu), (pc))
++#endif
++
+ #endif /* PSXRECOMP_INTERRUPTS_H */
+--- a/runtime/src/interrupts.c
++++ b/runtime/src/interrupts.c
+@@ -25,6 +25,7 @@
+  *   entire handler call tree in one step.
+  */
+ 
++#define PSXRECOMP_INTERRUPTS_IMPL 1	/* local patch 0019: the functions themselves, not interrupts.h's inline checks */
+ #include "interrupts.h"
+ #include "psx_memory.h"
+ #include "sio.h"
+@@ -190,8 +191,10 @@
+ extern uint64_t g_vblank_raise_count;
+ extern int g_cosim_dirty_pump_site;
+ 
+-/* Reentrancy guard: prevent interrupt handler from triggering interrupts. */
+-static int in_exception;
++/* Reentrancy guard: prevent interrupt handler from triggering interrupts. Local patch 0019: global, for the inline
++ * check (interrupts.h). */
++int psx_lean_in_exception;
++#define in_exception psx_lean_in_exception
+ /* Guest-cycle deadline: IRQ delivery is blocked while psx_get_cycle_count() is
+  * below this. 0 = no cooldown active. Counted in guest cycles (not calls) so both
+  * backends make the identical delivery decision — see the cooldown constants. */
+@@ -719,7 +722,8 @@
+  * detected nested, we record it here, let the outgoing thread resume
+  * transparently, and honor it at the next outermost block-leader boundary (top
+  * of psx_check_interrupts) where the thread can be re-saved cleanly. */
+-static int      s_defer_switch_pending = 0;
++int             psx_lean_defer_switch_pending = 0;	/* local patch 0019: global, for the inline check */
++#define s_defer_switch_pending psx_lean_defer_switch_pending
+ static uint32_t s_defer_switch_target  = 0;  /* TCB PCB[0] should name after the switch */
+ static uint32_t s_defer_switch_from    = 0;  /* the interrupted thread to re-save cleanly */
+ 
+--- a/runtime/src/overlay_loader.c
++++ b/runtime/src/overlay_loader.c
+@@ -2226,7 +2226,7 @@
+ 
+ extern void psx_dispatch_call(CPUState *cpu, uint32_t addr, uint32_t ra);
+ extern void psx_check_interrupts(CPUState *cpu);
+-extern void psx_check_interrupts_at(CPUState *cpu, uint32_t resume_pc);
++extern void (psx_check_interrupts_at)(CPUState *cpu, uint32_t resume_pc);	/* local patch 0019: not the inline check */
+ extern int psx_interrupt_delivery_needed(const CPUState *cpu);
+ extern void gte_execute(CPUState *cpu, uint32_t cmd);
+ extern int psx_syscall(CPUState *cpu, uint32_t code);
