@@ -59,8 +59,17 @@ const Control Controls[] {
 	{ "select", "select", "SELECT" }, { "start", "start", "START" },
 };
 
-std::string discPath;
-std::map<std::string, std::string> controls;	// a control's inputs, where Deadstation says
+// the arguments' (read before this file's other globals are made)
+std::string& discPath()
+{
+	static std::string path;
+	return path;
+}
+std::map<std::string, std::string>& controls()	// a control's inputs, where Deadstation says
+{
+	static std::map<std::string, std::string> list;
+	return list;
+}
 std::string dataDir;
 bool inputChanged = false;
 
@@ -87,12 +96,12 @@ __attribute__((constructor(101))) void arguments(int argc, char **argv, char **)
 				continue;
 			const std::string key = pair.substr(0, eq), value = pair.substr(eq + 1);
 			if (key.rfind(ControlPrefix, 0) == 0)
-				controls[key.substr(std::strlen(ControlPrefix))] = value;
+				controls()[key.substr(std::strlen(ControlPrefix))] = value;
 			else if (deadstation_module_setting != nullptr)
 				deadstation_module_setting(key.c_str(), value.c_str());
 		}
-		else if (discPath.empty())
-			discPath = argv[i];
+		else if (discPath().empty())
+			discPath() = argv[i];
 	}
 }
 
@@ -121,8 +130,8 @@ void writeInput()
 	file << "[controller]\nenabled = true\ndevice = 0\ndeadzone = 3277\n\n[mapping]\n";
 	for (const Control& control : Controls)
 	{
-		const auto chosen = controls.find(control.key);
-		const std::string inputs = chosen != controls.end() ? chosen->second : control.inputs;
+		const auto chosen = controls().find(control.key);
+		const std::string inputs = chosen != controls().end() ? chosen->second : control.inputs;
 		std::string sources;
 		size_t start = 0;
 		while (start <= inputs.size())
@@ -139,8 +148,8 @@ void writeInput()
 			"rs_up = righty-\nrs_down = righty+\nrs_left = rightx-\nrs_right = rightx+\n";
 }
 
-// the runtime's folder: this module's data. What the runtime keeps beside its mods (their packages) and the GPU's list of
-// pipelines come with the module, copied when it is a new version; its Fast Loading and CD Speed on from the start.
+// the runtime's folder: this module's data. What the runtime wants beside it (its BIOS, its mods' packages) and the GPU's list
+// of pipelines come with the module, copied when it is a new version; its Fast Loading and CD Speed on from the start.
 void prepareFolder(const fs::path& moduleDir, const std::string& version)
 {
 	std::error_code ec;
@@ -159,6 +168,11 @@ void prepareFolder(const fs::path& moduleDir, const std::string& version)
 		fs::copy(moduleDir / "mods" / "bundled", "mods/bundled", fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
 		if (ec)
 			DS_LOG("recomp module: its mods not copied: %s", ec.message().c_str());
+		ec.clear();
+		fs::remove_all("bios", ec);
+		fs::copy(moduleDir / "bios", "bios", fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+		if (ec)
+			DS_LOG("recomp module: its BIOS not copied: %s", ec.message().c_str());
 		ec.clear();
 		if (fs::exists(moduleDir / "pipelines.keys", ec))
 			fs::copy_file(moduleDir / "pipelines.keys", "pipelines.keys", fs::copy_options::overwrite_existing, ec);
@@ -201,7 +215,7 @@ void set(const std::string& key, const std::string& value)
 		hostCounterCells(value);
 	else if (key.rfind(ControlPrefix, 0) == 0)
 	{
-		controls[key.substr(std::strlen(ControlPrefix))] = value;
+		controls()[key.substr(std::strlen(ControlPrefix))] = value;
 		inputChanged = true;
 	}
 	else if (liveSetting == nullptr || !liveSetting(key.c_str(), value.c_str()))
@@ -352,12 +366,11 @@ extern "C" int __wrap_main(int, char **argv)
 	prepareFolder(moduleDir, field(manifest, "version"));
 	// its folder as the runtime finds it: argv[0]'s
 	std::vector<std::string> args { dataDir + "/" + exe.filename().string(), "--no-launcher", "--renderer", "vulkan",
-		"--game", (moduleDir / "game.toml").string(), "--bios", (moduleDir / "bios" / "openbios.bin").string(),
-		"--memcard-dir", dataDir + "/saves" };
-	if (!discPath.empty())
+		"--game", (moduleDir / "game.toml").string(), "--memcard-dir", dataDir + "/saves" };
+	if (!discPath().empty())
 	{
 		args.push_back("--disc");
-		args.push_back(discPath);
+		args.push_back(discPath());
 	}
 	std::vector<char *> made;
 	for (std::string& arg : args)

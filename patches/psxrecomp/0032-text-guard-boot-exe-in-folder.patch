@@ -1,0 +1,20 @@
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -315,9 +315,14 @@
+                             tok += c; j++;
+                             if (tok.size() > 64) break;
+                         }
+-                        const size_t s2 = tok.find_last_of("\\/");
+-                        if (s2 != std::string::npos) tok = tok.substr(s2 + 1);
+-                        if (!tok.empty() && iso.FindFile(tok, ent)) boot_name = tok;
++                        /* Local patch 0032: a boot file in a folder is found there. */
++                        if (!tok.empty() && iso.FindFile(tok, ent)) {
++                            boot_name = tok;
++                        } else {
++                            const size_t s2 = tok.find_last_of("\\/");
++                            if (s2 != std::string::npos) tok = tok.substr(s2 + 1);
++                            if (!tok.empty() && iso.FindFile(tok, ent)) boot_name = tok;
++                        }
+                     }
+                 }
+             }
