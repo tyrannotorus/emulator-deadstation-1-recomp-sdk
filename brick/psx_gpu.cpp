@@ -3011,11 +3011,22 @@ void bTexturedTriangle(int x0, int y0, int u0, int v0, int x1, int y1, int u1, i
 		corner(x2, y2, u2, v2, m, page, cx, cy, g.modRaw) };
 	primitive(true, v, 3, page, cx, cy);
 }
+// The PlayStation's texture coordinates are whole numbers, truncated on the way across a polygon, so a polygon stays on the texels its corners name.
+// Here they're floats: on a texel's very edge, the rounding of the interpolation falls either side of it, pixel by pixel. All the corners on one
+// texel (a whole limb painted from one) reads its middle; any other polygon stays just inside its corners' range.
+inline float insideTexels(float a, float b, float c, float at)
+{
+	constexpr float Inset = 1.f / 32.f;
+	const float lo = std::min({ a, b, c }), hi = std::max({ a, b, c });
+	return lo == hi ? lo + 0.5f : std::clamp(at, lo + Inset, hi - Inset);
+}
 void bShadedTexturedTriangle(int x0, int y0, int u0, int v0, uint32_t c0, int x1, int y1, int u1, int v1, uint32_t c1, int x2, int y2,
 		int u2, int v2, uint32_t c2, uint16_t cx, uint16_t cy, uint16_t page, int raw)
 {
-	const Vertex v[3] = { corner(x0, y0, u0, v0, c0, page, cx, cy, raw), corner(x1, y1, u1, v1, c1, page, cx, cy, raw),
+	Vertex v[3] = { corner(x0, y0, u0, v0, c0, page, cx, cy, raw), corner(x1, y1, u1, v1, c1, page, cx, cy, raw),
 		corner(x2, y2, u2, v2, c2, page, cx, cy, raw) };
+	for (Vertex& c : v)
+		c.u = insideTexels((float)u0, (float)u1, (float)u2, c.u), c.v = insideTexels((float)v0, (float)v1, (float)v2, c.v);
 	primitive(true, v, 3, page, cx, cy);
 }
 void quad(bool textured, const Vertex& a, const Vertex& b, const Vertex& c, const Vertex& d, uint16_t page, uint16_t cx, uint16_t cy)
@@ -3149,14 +3160,6 @@ void bulkTriangles(const uint8_t *bytes, int count)
 		}
 		Vertex built[3];
 		float zs[3];
-		// The PlayStation's texture coordinates are whole numbers, truncated on the way across a polygon, so a polygon stays on the texels its corners name.
-		// Here they're floats: on a texel's very edge, the rounding of the interpolation falls either side of it, pixel by pixel. All the corners on one
-		// texel (a whole limb painted from one) reads its middle; any other polygon stays just inside its corners' range.
-		const auto insideTexels = [](float a, float b, float c, float at) {
-			constexpr float Inset = 1.f / 32.f;
-			const float lo = std::min({ a, b, c }), hi = std::max({ a, b, c });
-			return lo == hi ? lo + 0.5f : std::clamp(at, lo + Inset, hi - Inset);
-		};
 		const float u0 = (float)(t.uv[0] & 0xFF), u1 = (float)(t.uv[1] & 0xFF), u2 = (float)(t.uv[2] & 0xFF);
 		const float v0 = (float)(t.uv[0] >> 8), v1 = (float)(t.uv[1] >> 8), v2 = (float)(t.uv[2] >> 8);
 		for (int j = 0; j < 3; j++)
