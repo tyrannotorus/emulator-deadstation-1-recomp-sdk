@@ -3149,11 +3149,21 @@ void bulkTriangles(const uint8_t *bytes, int count)
 		}
 		Vertex built[3];
 		float zs[3];
+		// The PlayStation's texture coordinates are whole numbers, truncated on the way across a polygon, so a polygon stays on the texels its corners name.
+		// Here they're floats: on a texel's very edge, the rounding of the interpolation falls either side of it, pixel by pixel. All the corners on one
+		// texel (a whole limb painted from one) reads its middle; any other polygon stays just inside its corners' range.
+		const auto insideTexels = [](float a, float b, float c, float at) {
+			constexpr float Inset = 1.f / 32.f;
+			const float lo = std::min({ a, b, c }), hi = std::max({ a, b, c });
+			return lo == hi ? lo + 0.5f : std::clamp(at, lo + Inset, hi - Inset);
+		};
+		const float u0 = (float)(t.uv[0] & 0xFF), u1 = (float)(t.uv[1] & 0xFF), u2 = (float)(t.uv[2] & 0xFF);
+		const float v0 = (float)(t.uv[0] >> 8), v1 = (float)(t.uv[1] >> 8), v2 = (float)(t.uv[2] >> 8);
 		for (int j = 0; j < 3; j++)
 		{
 			Vertex& v = built[j];
 			v.x = (t.x[j] - ax) * kx, v.y = (t.y[j] - ay) * ky;
-			v.u = (float)(t.uv[j] & 0xFF), v.v = (float)(t.uv[j] >> 8);
+			v.u = insideTexels(u0, u1, u2, (float)(t.uv[j] & 0xFF)), v.v = insideTexels(v0, v1, v2, (float)(t.uv[j] >> 8));
 			v.r = t.rgb[j] & 255, v.g = (t.rgb[j] >> 8) & 255, v.b = (t.rgb[j] >> 16) & 255, v.a = 0;
 			v.page = t.page, v.clutX = (uint16_t)memoSlot, v.clutY = clutY, v.flags = t.raw ? 1 : 0;
 			tintCorner(v);
